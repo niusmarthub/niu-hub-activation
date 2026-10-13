@@ -12,12 +12,16 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread, Event
 
 DATA_DIR = Path(os.environ.get('NIU_DATA_DIR', '/data'))
 CONFIG_FILE = DATA_DIR / 'hub_config.json'
 PENDING_FILE = DATA_DIR / 'activation_pending.json'
+ROTATION_FILE = DATA_DIR / 'key_rotation_pending.json'
+SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '60')))
+STOP = Event()
 ACTIVATION_URL = os.environ.get('NIU_ACTIVATION_URL', 'https://niusmart.com/hub-activation.php')
+KEY_UPDATE_URL = os.environ.get('NIU_KEY_UPDATE_URL', 'https://niusmart.com/key-update.php')
 BIND = os.environ.get('NIU_BIND', '0.0.0.0')
 PORT = int(os.environ.get('NIU_PORT', '8099'))
 LOCK = Lock()
@@ -64,14 +68,97 @@ def identifier():
     return value
 
 
-def api(payload):
+def api(payload, url=ACTIVATION_URL):
     data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(ACTIVATION_URL, data=data, headers={'Content-Type':'application/json','Accept':'application/json'}, method='POST')
+    req = urllib.request.Request(url, data=data, headers={'Content-Type':'application/json','Accept':'application/json'}, method='POST')
     with urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context()) as response:
         result = json.load(response)
     if not isinstance(result, dict) or not result.get('success'):
         raise RuntimeError('Réponse serveur invalide')
     return result
+
+
+def rotation_request(action, config, key, **extra):
+    payload = {'action': action, 'site_id': config['site_id'],
+               'hub_identifier': config['hub_identifier'], 'api_key': key}
+    payload.update(extra)
+    return api(payload, KEY_UPDATE_URL)
+
+
+def resume_rotation(config):
+    state = load_json(ROTATION_FILE)
+    if not state:
+        return False
+    if config['site_id'] != 2 or state.get('site_id') != config['site_id'] or state.get('hub_identifier') != config['hub_identifier']:
+        raise RuntimeError('Rotation associee a un autre Hub')
+    old_key = state.get('old_api_key')
+    new_key = state.get('new_api_key')
+    if not isinstance(old_key, str) or not isinstance(new_key, str) or not old_key or not new_key:
+        raise RuntimeError('Etat de rotation invalide')
+    if config['api_key'] == old_key:
+        # The server might have committed before the response was lost.
+        # First attempt with the old key; if it fails, retry with the new key.
+        try:
+            result = rotation_request('commit', config, old_key, new_api_key=new_key)
+        except urllib.error.HTTPError as error:
+            if error.code not in (403, 409):
+                raise
+            result = rotation_request('commit', config, new_key, new_api_key=new_key)
+        if result.get('status') != 'done':
+            raise RuntimeError('Commit non confirme')
+        config = dict(config)
+        config['api_key'] = new_key
+        write_json_atomic(CONFIG_FILE, config)
+    elif config['api_key'] != new_key:
+        raise RuntimeError('Cle locale differente de la rotation')
+    # Keep recovery state until the acknowledgement is received.
+    result = rotation_request('ack', config, new_key)
+    if result.get('status') != 'done':
+        raise RuntimeError('ACK non confirme')
+    ROTATION_FILE.unlink(missing_ok=True)
+    return True
+
+
+def synchronize():
+    with LOCK:
+        config = load_json(CONFIG_FILE)
+        if not isinstance(config, dict) or config.get('site_id') != 2 or PENDING_FILE.exists():
+            return
+        if ROTATION_FILE.exists():
+            resume_rotation(config)
+            config = load_json(CONFIG_FILE)
+        if not isinstance(config.get('site_config'), dict):
+            config['site_config'] = {}
+        response = api({'action':'update', 'site_id':2,
+                        'hub_identifier':config['hub_identifier'],
+                        'api_key':config['api_key'],
+                        'site_config':config['site_config']})
+        changes = response.get('changes', {})
+        if not isinstance(changes, dict):
+            raise RuntimeError('Changements invalides')
+        if changes:
+            config = dict(config)
+            config['site_config'] = dict(config['site_config'])
+            config['site_config'].update(changes)
+            write_json_atomic(CONFIG_FILE, config)
+        if response.get('key_update_pending'):
+            result = rotation_request('check', config, config['api_key'])
+            if result.get('status') == 'pending':
+                new_key = result.get('new_api_key')
+                if not isinstance(new_key, str) or len(new_key) < 16:
+                    raise RuntimeError('Nouvelle cle invalide')
+                write_json_atomic(ROTATION_FILE, {
+                    'site_id':2, 'hub_identifier':config['hub_identifier'],
+                    'old_api_key':config['api_key'], 'new_api_key':new_key})
+                resume_rotation(config)
+
+
+def sync_loop():
+    while not STOP.wait(SYNC_INTERVAL):
+        try:
+            synchronize()
+        except Exception as exc:
+            print('Niu Hub sync: ' + type(exc).__name__, flush=True)
 
 
 def confirm_pending():
@@ -138,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
                 aid = result.get('activation_id')
                 if not isinstance(key,str) or not key or not isinstance(device,str) or not device or type(site) is not int or type(aid) is not int:
                     raise RuntimeError('Configuration incomplète')
-                write_json_atomic(CONFIG_FILE, {'site_id':site,'device_code':device,'api_key':key,'api_base_url':'https://niusmart.com','hub_identifier':identifier()})
+                write_json_atomic(CONFIG_FILE, {'site_id':site,'device_code':device,'api_key':key,'api_base_url':'https://niusmart.com','hub_identifier':identifier(), 'site_config':result.get('site_config', {}) if site == 2 else {}})
                 write_json_atomic(PENDING_FILE, {'activation_id':aid})
                 try:
                     confirm_pending()
@@ -161,5 +248,6 @@ if __name__ == '__main__':
             confirm_pending()
         except Exception:
             pass
+    Thread(target=sync_loop, daemon=True).start()
     print(f'Niu Hub activation listening on {BIND}:{PORT}', flush=True)
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
