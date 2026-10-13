@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.3.1"
+version: "0.3.2"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
