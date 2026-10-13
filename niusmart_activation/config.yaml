@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.3.0"
+version: "0.3.1"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
@@ -16,3 +16,8 @@ ports_description:
   8099/tcp: "Interface d'activation Niu Hub (reseau local uniquement)"
 options: {}
 schema: {}
+
+# Acces explicite au fichier de configuration Home Assistant.
+map:
+  - type: homeassistant_config
+    read_only: false

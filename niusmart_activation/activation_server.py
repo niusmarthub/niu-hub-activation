@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""NiuSmart | Niu Hub Activation -- version 0.3.0.
+"""NiuSmart | Niu Hub Activation -- version 0.3.1.
 
 Architecture : cinq modes separes. Ne JAMAIS transformer une synchronisation
 ordinaire en activation, rotation de cle ou changement de serveur.
@@ -41,7 +41,7 @@ MODE 5 - RECUPERATION (client pret; endpoint serveur restant a implementer)
     reste possible. Ce mode NE cree PAS une nouvelle activation.
 
 Fichiers persistants de l'add-on (dans /data, jamais dans le code installe) :
-  hub_config.json               configuration active, source de verite locale
+  hub_config.json               ancien format prive (migration uniquement)
   api_key_backup.json           identite + derniere cle et serveur CONFIRMES
   hub_identifier                identifiant stable, cree une seule fois
   activation_pending.json       confirmation initiale non terminee
@@ -66,6 +66,8 @@ from threading import Event, Lock, Thread
 
 DATA_DIR = Path(os.environ.get('NIU_DATA_DIR', '/data'))
 CONFIG_FILE = DATA_DIR / 'hub_config.json'
+SHARED_FILE = Path(os.environ.get('NIU_SHARED_CONFIG', '/homeassistant/niusmart/hub_config.json'))
+SHARED_ARCHIVE = SHARED_FILE.parent / 'archive' / 'hub_hub_config.json'
 BACKUP_FILE = DATA_DIR / 'api_key_backup.json'
 PENDING_FILE = DATA_DIR / 'activation_pending.json'
 ROTATION_FILE = DATA_DIR / 'key_rotation_pending.json'
@@ -149,6 +151,120 @@ def write_json_atomic(path, data):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def shared_to_internal(shared):
+    """Adapter l'ancien protocole API au fichier HA sans perdre ses sections."""
+    if not isinstance(shared, dict):
+        return None
+    hub = shared.get('hub')
+    niu = shared.get('niusmart')
+    if not isinstance(hub, dict) or not isinstance(niu, dict):
+        return None
+    return {
+        'site_id': hub.get('site_id'),
+        'device_code': hub.get('device_code'),
+        'api_key': niu.get('api_key'),
+        'api_base_url': niu.get('server_url'),
+        'hub_identifier': shared.get('hub', {}).get('hub_identifier') or existing_identifier(),
+        'site_config': shared.get('site_config', {}),
+    }
+
+
+def load_active_config():
+    """Le fichier Home Assistant est prioritaire, jamais le JSON prive."""
+    if SHARED_FILE.exists():
+        return shared_to_internal(load_json(SHARED_FILE))
+    # Ne jamais synchroniser un fichier prive a la place du fichier Home Assistant.
+    return None
+
+
+def save_active_config(config, activation=False):
+    """Sauvegarde tournante avant remplacement, restauration sur echec.
+
+    L'archive manuelle n'est jamais lue ni modifiee par cette fonction.
+    """
+    validate_config(config, require_full_site=False)
+    if not SHARED_FILE.exists():
+        # 0.3.1 ne doit jamais creer un fichier HA incomplet.
+        raise RuntimeError('Fichier HA absent; activation reportee jusqu au modele complet')
+    shared = load_json(SHARED_FILE)
+    if not isinstance(shared, dict) or not isinstance(shared.get('hub'), dict) or not isinstance(shared.get('niusmart'), dict):
+        raise RuntimeError('Fichier HA invalide; aucune modification')
+    if shared['hub'].get('site_id') != PILOT_SITE_ID or shared['hub'].get('site_id') != config['site_id']:
+        raise RuntimeError('Site HA different du site pilote')
+    if shared['hub'].get('device_code') != config['device_code']:
+        raise RuntimeError('Identite appareil differente')
+    # Pas de changement de serveur ou cle lors d'une simple mise a jour.
+    # Les changements sont effectues uniquement par le mode qui fournit config.
+    if shared['niusmart'].get('server_url') != config['api_base_url']:
+        raise RuntimeError('Changement serveur non autorise')
+    if activation:
+        if is_nonblank(shared['niusmart'].get('api_key')):
+            raise RuntimeError('Cle deja presente: reactivation interdite')
+        if is_nonblank(shared['hub'].get('hub_identifier')):
+            raise RuntimeError('Identifiant deja present: reactivation interdite')
+        shared['hub']['hub_identifier'] = config['hub_identifier']
+    elif not is_nonblank(shared['niusmart'].get('api_key')):
+        raise RuntimeError('Cle existante absente')
+    shared['niusmart']['api_key'] = config['api_key']
+    if 'hub_identifier' in shared['hub'] and shared['hub']['hub_identifier'] != config['hub_identifier']:
+        raise RuntimeError('Identifiant Hub different')
+    shared['site_config'] = config['site_config']
+    # S'assurer que la section site est valide AVANT tout remplacement.
+    if not isinstance(shared['site_config'], dict):
+        raise RuntimeError('Options site invalides')
+    validate_site_config(shared['site_config'], config['site_id'], complete=False)
+    SHARED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if SHARED_FILE.exists():
+        SHARED_ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
+        # Sauvegarder les octets EXACTS, ne jamais toucher aux archives manuelles.
+        raw = SHARED_FILE.read_bytes()
+        if not raw:
+            raise RuntimeError('Fichier HA vide; aucune modification')
+        fd, tmp = tempfile.mkstemp(prefix='.hub-archive-', dir=SHARED_ARCHIVE.parent)
+        try:
+            with os.fdopen(fd, 'wb') as out:
+                os.fchmod(out.fileno(), 0o600)
+                out.write(raw)
+                out.flush()
+                os.fsync(out.fileno())
+            if Path(tmp).read_bytes() != raw:
+                raise RuntimeError('Verification archive echouee')
+            os.replace(tmp, SHARED_ARCHIVE)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    else:
+        raw = None
+    fd, tmp = tempfile.mkstemp(prefix='.hub-new-', dir=SHARED_FILE.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            os.fchmod(out.fileno(), 0o600)
+            json.dump(shared, out, ensure_ascii=False, indent=2)
+            out.write('\n')
+            out.flush()
+            os.fsync(out.fileno())
+        if load_json(Path(tmp)) != shared:
+            raise RuntimeError('Verification configuration echouee')
+        os.replace(tmp, SHARED_FILE)
+        if load_json(SHARED_FILE) != shared:
+            if raw is not None:
+                fd_restore, restore_tmp = tempfile.mkstemp(prefix='.hub-restore-', dir=SHARED_FILE.parent)
+                try:
+                    with os.fdopen(fd_restore, 'wb') as restore_out:
+                        os.fchmod(restore_out.fileno(), 0o600)
+                        restore_out.write(raw)
+                        restore_out.flush()
+                        os.fsync(restore_out.fileno())
+                    os.replace(restore_tmp, SHARED_FILE)
+                finally:
+                    if os.path.exists(restore_tmp):
+                        os.unlink(restore_tmp)
+            raise RuntimeError('Verification apres ecriture echouee')
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def load_json(path):
@@ -253,6 +369,24 @@ def validate_identity_for_sync(config):
         return False
 
 
+def existing_identifier():
+    """Read an existing local identifier without creating a new identity."""
+    if not IDENTIFIER_FILE.is_file():
+        return None
+    value = IDENTIFIER_FILE.read_text(encoding='ascii').strip()
+    return value if IDENTIFIER_PATTERN.fullmatch(value) else None
+
+
+def hub_identity():
+    """Prefer the identity assigned by NiuSmart, fall back to legacy local ID."""
+    shared = load_json(SHARED_FILE)
+    if isinstance(shared, dict) and isinstance(shared.get('hub'), dict):
+        value = shared['hub'].get('hub_identifier')
+        if isinstance(value, str) and IDENTIFIER_PATTERN.fullmatch(value):
+            return value
+    return existing_identifier()
+
+
 def identifier():
     if IDENTIFIER_FILE.exists():
         value = IDENTIFIER_FILE.read_text(encoding='ascii').strip()
@@ -300,7 +434,7 @@ def validate_backup(backup):
         raise ValueError('Site de secours invalide')
     if not isinstance(backup['hub_identifier'], str) or not IDENTIFIER_PATTERN.fullmatch(backup['hub_identifier']):
         raise ValueError('Identifiant de secours invalide')
-    if backup['hub_identifier'] != identifier():
+    if backup['hub_identifier'] != hub_identity():
         raise ValueError('Sauvegarde associee a un autre Hub')
     if not is_nonblank(backup['api_key']) or not is_nonblank(backup['device_code']):
         raise ValueError('Cle de secours invalide')
@@ -366,7 +500,7 @@ def resume_rotation(config):
         config = dict(config)
         config['api_key'] = new_key
         validate_config(config)
-        write_json_atomic(CONFIG_FILE, config)
+        save_active_config(config)
     elif config['api_key'] != new_key:
         raise RuntimeError('Cle locale differente de la rotation')
     # S'il y a eu une coupure, on refait l'ACK avant de toucher au backup.
@@ -405,12 +539,12 @@ def apply_site_changes(config, changes):
 def synchronize():
     """Mise a jour des seuls champs du site; aucune rotation implicite."""
     with LOCK:
-        config = load_json(CONFIG_FILE)
+        config = load_active_config()
         if not validate_identity_for_sync(config) or PENDING_FILE.exists():
             return
         if ROTATION_FILE.exists():
             resume_rotation(config)
-            config = load_json(CONFIG_FILE)
+            config = load_active_config()
             if not validate_identity_for_sync(config):
                 raise RuntimeError('Configuration invalide apres rotation')
         response = api({
@@ -425,7 +559,9 @@ def synchronize():
         changes = response.get('changes', {})
         updated, changed = apply_site_changes(config, changes)
         if changed:
-            write_json_atomic(CONFIG_FILE, updated)
+            if updated['api_key'] != config['api_key'] or updated['api_base_url'] != config['api_base_url']:
+                raise RuntimeError('Modification de cle ou serveur interdite')
+            save_active_config(updated)
             config = updated
         # Au premier update authentifie, initialiser le backup des anciens Hubs.
         ensure_backup_after_authenticated_update(config)
@@ -448,18 +584,18 @@ def synchronize():
 
 def confirm_pending():
     pending = load_json(PENDING_FILE)
-    config = load_json(CONFIG_FILE)
+    config = load_active_config()
     if not isinstance(pending, dict) or not isinstance(config, dict):
         return False
     validate_config(config)
-    if config['hub_identifier'] != identifier() or config['site_id'] != PILOT_SITE_ID:
+    if config['hub_identifier'] != hub_identity() or config['site_id'] != PILOT_SITE_ID:
         raise RuntimeError('Activation associee a un autre Hub')
     aid = pending.get('activation_id')
     if type(aid) is not int or aid < 1:
         raise RuntimeError('Etat activation invalide')
     result = api({
         'action': 'confirm', 'activation_id':aid,
-        'hub_identifier':identifier(), 'api_key':config['api_key'],
+        'hub_identifier':config['hub_identifier'], 'api_key':config['api_key'],
     }, endpoint(config, 'hub-activation.php'))
     if result.get('status') != 'redeemed' or result.get('site_id') != config['site_id']:
         raise RuntimeError('Confirmation activation incoherente')
@@ -481,8 +617,8 @@ def recover_if_needed():
     verifier identifiant, site, cle et statut active avant de renvoyer le JSON.
     """
     with LOCK:
-        current = load_json(CONFIG_FILE)
-        if validate_identity_for_sync(current) or PENDING_FILE.exists() or ROTATION_FILE.exists():
+        current = load_active_config()
+        if SHARED_FILE.exists() or validate_identity_for_sync(current) or PENDING_FILE.exists() or ROTATION_FILE.exists():
             return False
         if not BACKUP_FILE.exists():
             return False
@@ -498,19 +634,19 @@ def recover_if_needed():
         for key, value in backup.items():
             if recovered.get(key) != value:
                 raise RuntimeError('Recuperation refusee: identite/cle/serveur differents')
-        if recovered['hub_identifier'] != identifier():
+        if recovered['hub_identifier'] != hub_identity():
             raise RuntimeError('Identite locale differente')
         if recovered['site_id'] != PILOT_SITE_ID:
             raise RuntimeError('Recuperation non autorisee sur ce site')
         # Une reponse complete et authentifiee seulement peut remplacer le fichier.
-        write_json_atomic(CONFIG_FILE, recovered)
+        save_active_config(recovered)
         return True
 
 
 def sync_loop():
     while not STOP.wait(SYNC_INTERVAL):
         try:
-            config = load_json(CONFIG_FILE)
+            config = load_active_config()
             if not validate_identity_for_sync(config):
                 recover_if_needed()
             else:
@@ -544,11 +680,11 @@ class Handler(BaseHTTPRequestHandler):
             raw = ICON_FILE.read_bytes()
             content_type = 'image/png'
         elif self.path == '/status':
-            config = load_json(CONFIG_FILE)
+            config = load_active_config()
             activated = validate_identity_for_sync(config) and not PENDING_FILE.exists()
             return self.send_json(200, {
                 'activated': activated, 'pending': PENDING_FILE.exists(),
-                'recovery_needed': (CONFIG_FILE.exists() or BACKUP_FILE.exists()) and not activated and not PENDING_FILE.exists(),
+                'recovery_needed': (SHARED_FILE.exists() or CONFIG_FILE.exists() or BACKUP_FILE.exists()) and not activated and not PENDING_FILE.exists(),
             })
         else:
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
@@ -579,22 +715,32 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         return self.send_json(503, {'success':False,'message':'Confirmation en attente; reessayez plus tard.'})
                 # Refus aussi si fichier corrompu : ne jamais en autoriser l'ecrasement.
-                if CONFIG_FILE.exists() or BACKUP_FILE.exists() or ROTATION_FILE.exists():
+                if CONFIG_FILE.exists() or BACKUP_FILE.exists() or ROTATION_FILE.exists() or existing_identifier() is not None:
                     return self.send_json(409, {'success':False,'message':'Hub deja configure ou en recuperation; intervention manuelle requise.'})
-                result = api({'action':'activate','code':code,'hub_identifier':identifier()})
+                template = load_json(SHARED_FILE)
+                required = {'hub', 'niusmart', 'home_assistant', 'netbird', 'localtuya', 'tuya_developer', 'ssh'}
+                if (not isinstance(template, dict) or not required.issubset(template)
+                        or not isinstance(template.get('hub'), dict) or not isinstance(template.get('niusmart'), dict)
+                        or template['hub'].get('site_id') != PILOT_SITE_ID
+                        or is_nonblank(template['niusmart'].get('api_key'))
+                        or is_nonblank(template['hub'].get('hub_identifier'))):
+                    return self.send_json(409, {'success':False,'message':'Modele HA absent, incomplet ou Hub deja active.'})
+                result = api({'action':'activate','code':code})
                 aid = result.get('activation_id')
                 config = {
                     'site_id': result.get('site_id'),
                     'device_code': result.get('device_code'),
                     'api_key': result.get('api_key'),
                     'api_base_url': DEFAULT_BASE_URL,
-                    'hub_identifier': identifier(),
+                    'hub_identifier': result.get('hub_identifier'),
                     'site_config': result.get('site_config'),
                 }
                 if type(aid) is not int or aid < 1 or config['site_id'] != PILOT_SITE_ID:
                     raise RuntimeError('Activation non autorisee sur ce site pilote')
                 validate_config(config)  # TOUS les champs AVANT ecriture.
-                write_json_atomic(CONFIG_FILE, config)
+                if existing_identifier() is not None:
+                    raise RuntimeError('Identifiant deja attribue; activation interdite')
+                save_active_config(config, activation=True)
                 write_json_atomic(PENDING_FILE, {'activation_id':aid})
                 try:
                     confirm_pending()
@@ -614,13 +760,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    identifier()
     if PENDING_FILE.exists():
         try:
             confirm_pending()
         except Exception:
             print('Niu Hub: confirmation initiale en attente', flush=True)
-    if not validate_identity_for_sync(load_json(CONFIG_FILE)):
+    if not validate_identity_for_sync(load_active_config()):
         try:
             recover_if_needed()
         except urllib.error.HTTPError as exc:
