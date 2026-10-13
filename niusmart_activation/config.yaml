@@ -1,7 +1,7 @@
 name: "Niu Hub Activation"
-version: "0.2.0"
+version: "0.3.0"
 slug: "niu_activation"
-description: "Activation et synchronisation automatique d'un Niu Hub depuis NiuSmart"
+description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
 startup: application
 boot: auto
