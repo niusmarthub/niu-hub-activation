@@ -89,6 +89,7 @@ PORT = int(os.environ.get('NIU_PORT', '8099'))
 PILOT_SITE_ID = 2
 STOP = Event()
 LOCK = Lock()
+TUYA_SCAN_LOCK = Lock()
 CODE_PATTERN = re.compile(r'^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$')
 IDENTIFIER_PATTERN = re.compile(r'^niu-[a-f0-9]{32}$')
 
@@ -122,11 +123,19 @@ input,button{width:100%;font-size:18px;padding:14px;border-radius:9px;margin:8px
 input{background:#ecf4f9;border:1px solid #93afc1;color:#14233c;text-align:center;text-transform:uppercase;letter-spacing:1px}
 button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}button:disabled{opacity:.5;cursor:wait}
 #msg{min-height:38px;white-space:pre-wrap;font-size:15px}
+#tuyaResults{white-space:pre-wrap;overflow-wrap:anywhere;background:#081725;padding:12px;border-radius:8px;max-height:320px;overflow:auto;font-size:13px}
+#scanMsg{min-height:24px}
 </style></head><body><main class="card">
 <img src="/logo.png" alt="NiuSmart" class="logo"><h1>Activation Niu Hub</h1>
 <p>Entrez le code d'activation affiché dans NiuSmart.</p>
 <form id="form"><input id="code" maxlength="19" placeholder="ABCD-1234-ABCD-1234" autocomplete="off" required aria-label="Code d'activation">
 <button id="go">Activer</button></form><p id="msg" role="status" aria-live="polite"></p>
+<section aria-labelledby="tuyaTitle" style="margin-top:24px;border-top:1px solid #28516b;padding-top:18px">
+<h2 id="tuyaTitle">Diagnostic de détection Tuya</h2>
+<p>Balayage du réseau local en lecture seule. Aucune commande n’est envoyée aux modules.</p>
+<button id="scanTuya" type="button">Balayer le réseau Tuya</button>
+<p id="scanMsg" role="status" aria-live="polite"></p><pre id="tuyaResults"></pre>
+</section>
 </main><script>
 const f=document.getElementById('form'),b=document.getElementById('go'),m=document.getElementById('msg');
 f.addEventListener('submit',async e=>{e.preventDefault();b.disabled=true;m.textContent='Activation en cours…';
@@ -136,6 +145,11 @@ catch(e){m.textContent='Connexion au service local impossible.'}finally{b.disabl
 fetch('/status').then(r=>r.json()).then(x=>{if(x.activated){f.hidden=true;m.textContent='Ce Niu Hub est déjà activé.'}
 else if(x.pending){f.hidden=true;m.textContent='Configuration reçue; confirmation en attente.'}
 else if(x.recovery_needed){f.hidden=true;m.textContent='Configuration incomplète. Récupération ou intervention requise.'}}).catch(()=>{});
+const scanButton=document.getElementById('scanTuya'),scanMsg=document.getElementById('scanMsg'),scanResults=document.getElementById('tuyaResults');
+scanButton.addEventListener('click',async()=>{scanButton.disabled=true;scanMsg.textContent='Balayage en cours…';scanResults.textContent='';
+try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=`${x.count} module(s) détecté(s).`;
+scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\nIP: ${d.ip}\nVersion: ${d.version||'inconnue'}`).join('\n\n'):'Aucun module détecté.';
+}catch(e){scanMsg.textContent=e.message||'Échec du balayage.'}finally{scanButton.disabled=false}});
 </script></body></html>'''
 
 
@@ -749,6 +763,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_POST(self):
+        if self.path == '/tuya/scan':
+            if not TUYA_SCAN_LOCK.acquire(blocking=False):
+                return self.send_json(409, {'success':False,'message':'Un balayage est déjà en cours.'})
+            try:
+                from tuya_discovery import discover_once
+                discover_once(str(DATA_DIR))
+                result_file = DATA_DIR / 'tuya_discovery.json'
+                result = json.loads(result_file.read_text(encoding='utf-8'))
+                raw_devices = result.get('devices', {}) if isinstance(result, dict) else {}
+                devices = []
+                if isinstance(raw_devices, dict):
+                    for device_id, info in raw_devices.items():
+                        if not isinstance(device_id, str) or not isinstance(info, dict):
+                            continue
+                        ip = info.get('ip')
+                        if isinstance(ip, str) and ip:
+                            version = info.get('version')
+                            devices.append({'device_id':device_id,'ip':ip,'version':version if isinstance(version, str) else None})
+                devices.sort(key=lambda item: item['device_id'])
+                diagnostic('tuya_discovery_manual', result='ok', status='devices_found' if devices else 'none')
+                return self.send_json(200, {'success':True,'scanned_at':result.get('scanned_at'),'count':len(devices),'devices':devices})
+            except Exception as exc:
+                diagnostic_error('tuya_discovery_manual_error', exc)
+                return self.send_json(500, {'success':False,'message':'Balayage impossible. Consultez le journal de l’application.'})
+            finally:
+                TUYA_SCAN_LOCK.release()
         if self.path != '/activate':
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
         try:
