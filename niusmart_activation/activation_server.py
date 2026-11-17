@@ -78,6 +78,8 @@ LOGO_FILE = Path(__file__).with_name('logo.png')
 ICON_FILE = Path(__file__).with_name('icon.png')
 
 SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '60')))
+TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '0') == '1'
+TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 DEFAULT_BASE_URL = 'https://niusmart.com'
 ACTIVATION_URL = os.environ.get('NIU_ACTIVATION_URL', DEFAULT_BASE_URL + '/hub-activation.php')
 KEY_UPDATE_URL = os.environ.get('NIU_KEY_UPDATE_URL', DEFAULT_BASE_URL + '/key-update.php')
@@ -695,6 +697,19 @@ def sync_loop():
             diagnostic_error('sync_error', exc)
 
 
+def tuya_discovery_loop():
+    # Isolated from activation and key rotation. No commands are sent to devices.
+    from tuya_discovery import discover_once
+    while not STOP.is_set():
+        try:
+            count = discover_once(str(DATA_DIR))
+            diagnostic('tuya_discovery', result='ok', status='devices_found' if count else 'none')
+        except Exception as exc:
+            diagnostic_error('tuya_discovery_error', exc)
+        if STOP.wait(TUYA_SCAN_INTERVAL):
+            break
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_json(self, code, obj):
         raw = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -810,5 +825,7 @@ if __name__ == '__main__':
         except Exception as exc:
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
+    if TUYA_DISCOVERY_ENABLED:
+        Thread(target=tuya_discovery_loop, daemon=True).start()
     print(f'Niu Hub activation listening on {BIND}:{PORT}', flush=True)
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
