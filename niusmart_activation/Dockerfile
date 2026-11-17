@@ -1,6 +1,8 @@
 FROM python:3.12-alpine
-RUN apk add --no-cache python3 ca-certificates
+RUN apk add --no-cache python3 ca-certificates \
+    && pip install --no-cache-dir tinytuya==1.21.1
 COPY activation_server.py /usr/local/bin/activation_server.py
+COPY tuya_discovery.py /usr/local/bin/tuya_discovery.py
 COPY logo.png /usr/local/bin/logo.png
 COPY icon.png /usr/local/bin/icon.png
 CMD ["python3", "/usr/local/bin/activation_server.py"]

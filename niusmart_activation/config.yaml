@@ -1,11 +1,13 @@
 name: "Niu Hub Activation"
-version: "0.3.2"
+version: "0.3.4"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
 startup: application
 boot: auto
 init: false
+# Acces aux broadcasts LAN Tuya (UDP 6666/6667/7000).
+host_network: true
 arch:
   - aarch64
   - armv7
