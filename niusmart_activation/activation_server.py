@@ -140,6 +140,8 @@ button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}b
 <p>Recherche les modules Tuya sur le réseau local sans modifier leurs états.</p>
 <button id="scanTuya" type="button">Balayer le réseau Tuya</button>
 <p id="scanMsg" role="status" aria-live="polite"></p><pre id="tuyaResults"></pre>
+<button id="testEnergy" type="button">Tester ENERGY via MQTT</button>
+<p id="energyMsg" role="status" aria-live="polite"></p>
 </section>
 </main><script>
 const f=document.getElementById('form'),b=document.getElementById('go'),m=document.getElementById('msg');
@@ -155,6 +157,17 @@ scanButton.addEventListener('click',async()=>{scanButton.disabled=true;scanMsg.t
 try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=x.message||`${x.count} module(s) détecté(s).`;
 scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\\n${d.last_known?'Dernière IP connue':'IP'}: ${d.ip}\\nVersion: ${d.version||'inconnue'}`).join('\\n\\n'):'Aucun module détecté.';
 }catch(e){scanMsg.textContent=e.message||'Échec du balayage.'}finally{scanButton.disabled=false}});
+const energyButton=document.getElementById('testEnergy'),energyMsg=document.getElementById('energyMsg');
+energyButton.addEventListener('click',async()=>{
+  energyButton.disabled=true;
+  energyMsg.textContent='Lecture d’ENERGY et publication MQTT en cours…';
+  try{
+    const response=await fetch('/tuya/energy-test',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const result=await response.json();
+    energyMsg.textContent=result.message;
+  }catch(e){energyMsg.textContent='Le test ENERGY n’a pas pu être lancé.'}
+  finally{energyButton.disabled=false}
+});
 </script></body></html>'''
 
 
@@ -848,7 +861,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def handle_energy_test(self):
+        if self.headers.get_content_type() != 'application/json':
+            return self.send_json(415, {'success': False, 'message': 'Requête JSON requise.'})
+        if not TUYA_SCAN_LOCK.acquire(blocking=False):
+            return self.send_json(409, {'success': False, 'message': 'Un test ou un balayage est déjà en cours.'})
+        try:
+            from energy_mqtt_test import EnergyTestError, test_energy
+
+            try:
+                message = test_energy(fetch_tuya_inventory(), load_json(TUYA_INVENTORY_FILE))
+            except EnergyTestError as exc:
+                return self.send_json(409, {'success': False, 'message': str(exc)})
+            diagnostic('tuya_energy_mqtt_test', result='ok')
+            return self.send_json(200, {'success': True, 'message': message})
+        except Exception as exc:
+            diagnostic_error('tuya_energy_mqtt_test_error', exc)
+            return self.send_json(500, {
+                'success': False, 'message': 'Échec du test ENERGY. Consultez le journal de l’application.',
+            })
+        finally:
+            TUYA_SCAN_LOCK.release()
+
     def do_POST(self):
+        if self.path == '/tuya/energy-test':
+            return self.handle_energy_test()
         if self.path == '/tuya/scan':
             if not TUYA_SCAN_LOCK.acquire(blocking=False):
                 return self.send_json(409, {'success':False,'message':'Un balayage est déjà en cours.'})
