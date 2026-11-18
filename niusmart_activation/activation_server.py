@@ -148,7 +148,7 @@ else if(x.recovery_needed){f.hidden=true;m.textContent='Configuration incomplèt
 const scanButton=document.getElementById('scanTuya'),scanMsg=document.getElementById('scanMsg'),scanResults=document.getElementById('tuyaResults');
 scanButton.addEventListener('click',async()=>{scanButton.disabled=true;scanMsg.textContent='Balayage en cours…';scanResults.textContent='';
 try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=`${x.count} module(s) détecté(s).`;
-scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\nIP: ${d.ip}\nVersion: ${d.version||'inconnue'}`).join('\n\n'):'Aucun module détecté.';
+scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\\nIP: ${d.ip}\\nVersion: ${d.version||'inconnue'}`).join('\\n\\n'):'Aucun module détecté.';
 }catch(e){scanMsg.textContent=e.message||'Échec du balayage.'}finally{scanButton.disabled=false}});
 </script></body></html>'''
 
