@@ -23,6 +23,35 @@ MEASUREMENTS = {
 }
 
 
+def select_measurement(datapoints, values):
+    by_code = {dp.get("status_code"): str(dp["dp_id"]) for dp in datapoints}
+    for code, label in MEASUREMENTS.items():
+        dp_id = by_code.get(code)
+        value = values.get(dp_id)
+        if type(value) in (int, float) and isfinite(value):
+            return dp_id, label, value
+
+    if not values:
+        raise EnergyTestError("ENERGY n’a renvoyé aucun datapoint local.")
+
+    dp_ids = sorted(
+        (dp_id for dp_id in values if dp_id.isascii() and dp_id.isdecimal()),
+        key=int,
+    )
+    for dp_id in dp_ids:
+        value = values[dp_id]
+        if type(value) in (int, float) and isfinite(value):
+            return dp_id, f"DP {dp_id}", value
+
+    details = ", ".join(f"DP {dp_id} ({type(values[dp_id]).__name__})" for dp_id in dp_ids[:10])
+    if len(dp_ids) > 10:
+        details += ", …"
+    message = "ENERGY n’a renvoyé aucune valeur numérique directe."
+    if details:
+        message += f" Datapoints reçus : {details}."
+    raise EnergyTestError(message)
+
+
 def test_energy(feed, inventory):
     if not feed or not isinstance(inventory, dict) or feed["hub_id"] != inventory.get("hub_id"):
         raise EnergyTestError("Lance d’abord un balayage Tuya sur ce hub.")
@@ -59,27 +88,20 @@ def test_energy(feed, inventory):
     if not isinstance(values, dict):
         raise EnergyTestError("ENERGY n’a renvoyé aucune mesure locale exploitable.")
 
-    by_code = {dp.get("status_code"): str(dp["dp_id"]) for dp in module["datapoints"]}
-    for code, label in MEASUREMENTS.items():
-        dp_id = by_code.get(code)
-        value = values.get(dp_id)
-        if type(value) in (int, float) and isfinite(value):
-            break
-    else:
-        raise EnergyTestError("Aucune mesure numérique reconnue dans les datapoints d’ENERGY.")
+    dp_id, label, value = select_measurement(module["datapoints"], values)
 
     # The inventory feed doesn't include conversion factors, so label the value as raw.
     unique_id = f"niusmart_{device_id}_test_dp{dp_id}"
     state_topic = f"niusmart/{feed['hub_id']}/tuya/energy/test/{dp_id}/state"
     discovery = {
-        "name": f"Test {label.lower()} (valeur brute)",
+        "name": f"Test {label} (valeur brute)",
         "unique_id": unique_id,
         "state_topic": state_topic,
         "device": {"identifiers": [f"niusmart_tuya_{device_id}"], "name": name},
         "expire_after": 300,
     }
     publish_sample(broker, f"homeassistant/sensor/{unique_id}/config", discovery, value)
-    return f"MQTT a reçu la mesure ENERGY, DP {dp_id} ({label}) = {value} brut."
+    return f"MQTT a reçu la valeur brute {value} pour le datapoint {dp_id} d’ENERGY."
 
 
 def mqtt_service():
