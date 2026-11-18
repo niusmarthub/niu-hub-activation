@@ -71,6 +71,7 @@
           <h2 id="servicesTitle">Services</h2>
           <dl>
             <div class="line"><dt>NetBird</dt><dd id="netbird"></dd></div>
+            <div class="line"><dt>États des modules Tuya dans MQTT</dt><dd id="tuya-mqtt"></dd></div>
             <div class="line"><dt>Mesures d’énergie MQTT</dt><dd id="mqtt"></dd></div>
           </dl>
         </section>
@@ -80,7 +81,10 @@
           <h2 id="modulesTitle">Modules NiuSmart</h2>
           <small id="moduleCount"></small>
         </div>
+        <button type="button" id="rediscover">Redécouvrir les modules</button>
+        <p id="discoveryStatus" role="status"></p>
         <p id="inventoryStatus" class="muted"></p>
+        <p id="readStatus" class="muted"></p>
         <div id="modules"></div>
       </section>
     </div>
@@ -171,14 +175,21 @@
         return row;
       }));
       node('netbird').textContent = data.netbird;
+      node('tuya-mqtt').textContent = data.tuya_mqtt;
       node('mqtt').textContent = data.energy_mqtt;
       node('moduleCount').textContent = data.scanned_at ?
         `${data.modules.filter(module => module.seen).length} détecté(s) / ${data.modules.length} reçu(s)` : '';
       node('inventoryStatus').textContent = data.error || (data.scanned_at ?
         `Dernier balayage · ${new Date(data.scanned_at).toLocaleString('fr-CA')}` : 'Inventaire en attente');
-      if (inventoryVersion !== data.scanned_at) {
+      node('readStatus').textContent = data.read_at ?
+        `Dernière lecture locale · ${new Date(data.read_at).toLocaleTimeString('fr-CA')}` : '';
+      node('discoveryStatus').textContent = data.discovery;
+      node('rediscover').hidden = !data.discovery_enabled;
+      node('rediscover').disabled = ['Redécouverte en attente…', 'Redécouverte en cours…'].includes(data.discovery);
+      const version = JSON.stringify(data.modules);
+      if (inventoryVersion !== version) {
         renderModules(data.modules);
-        inventoryVersion = data.scanned_at;
+        inventoryVersion = version;
       }
     }
 
@@ -205,13 +216,28 @@
       }
     });
 
+    node('rediscover').addEventListener('click', async () => {
+      node('rediscover').disabled = true;
+      try {
+        const response = await fetch('/rediscover', {
+          method: 'POST', headers: {'X-Niu-Hub-Request': 'rediscover'},
+        });
+        const data = await response.json();
+        node('discoveryStatus').textContent = data.message;
+        if (!data.success) node('rediscover').disabled = false;
+      } catch {
+        node('discoveryStatus').textContent = 'Connexion au service local impossible.';
+        node('rediscover').disabled = false;
+      }
+    });
+
     async function refreshLoop() {
       try {
         await refreshStatus();
       } catch {
         node('hubState').textContent = 'État du hub indisponible';
       }
-      setTimeout(refreshLoop, 15000);
+      setTimeout(refreshLoop, 1000);
     }
     refreshLoop();
   </script>

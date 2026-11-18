@@ -1,9 +1,10 @@
-"""Read only the Tuya inventory and publish supported measurements."""
+"""Read local Tuya datapoints and publish their states to MQTT."""
 
 import json
 import re
 from ipaddress import IPv4Address
 from math import isfinite
+from time import monotonic
 
 import tinytuya
 
@@ -65,7 +66,7 @@ RELAY_CODE = re.compile(r"(?:switch|relay)(?:_[1-9][0-9]*)?")
 TOPIC_ID = re.compile(r"[a-zA-Z0-9_-]+")
 
 
-def read_datapoints(module, endpoint):
+def local_device(module, endpoint):
     ip = str(IPv4Address(endpoint["ip"]))
     version = endpoint.get("version")
     if version not in ("3.1", "3.2", "3.3", "3.4", "3.5"):
@@ -73,9 +74,40 @@ def read_datapoints(module, endpoint):
     device = tinytuya.Device(module["tuya_device_id"], ip, module["local_key"], version=float(version))
     device.set_socketTimeout(3)
     device.set_socketRetryLimit(1)
+    return device
+
+
+def device_datapoints(device):
     response = device.status()
     values = response.get("dps") if isinstance(response, dict) else None
     return values if isinstance(values, dict) and values else None
+
+
+def read_datapoints(module, endpoint):
+    device = local_device(module, endpoint)
+    return device_datapoints(device) if device is not None else None
+
+
+def set_confirmed_relay(module, endpoint, dp_id, desired):
+    """Apply an explicit state to a relay already mapped to this module and DP."""
+    if type(desired) is not bool or not isinstance(dp_id, str) or not DP_ID.fullmatch(dp_id):
+        raise ValueError("Commande relais invalide")
+    if not endpoint.get("discovered"):
+        raise RuntimeError("Module relais non détecté")
+    device = local_device(module, endpoint)
+    if device is None:
+        raise RuntimeError("Protocole du relais non pris en charge")
+    current = (device_datapoints(device) or {}).get(dp_id)
+    if type(current) is not bool:
+        raise RuntimeError("État du relais indisponible")
+    if current is desired:
+        return current
+
+    device.set_status(desired, switch=int(dp_id))
+    confirmed = (device_datapoints(device) or {}).get(dp_id)
+    if confirmed is not desired:
+        raise RuntimeError("Le relais n’a pas confirmé l’état demandé")
+    return confirmed
 
 
 def declared_measurement(item, code, label):
@@ -135,9 +167,8 @@ def public_datapoints(module, values):
     return rows
 
 
-def snapshot_modules(feed, endpoints, on_read_error):
-    modules = []
-    for module in feed["modules"]:
+def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
+    def snapshot(module):
         device_id = module["tuya_device_id"]
         endpoint = endpoints[device_id]
         values = None
@@ -147,36 +178,58 @@ def snapshot_modules(feed, endpoints, on_read_error):
                 values = read_datapoints(module, endpoint)
             except Exception as exc:
                 on_read_error(exc)
-        modules.append({
+        return {
             "id": device_id, "name": module.get("device_name") or device_id,
             "product": module.get("product_name"), "product_id": module.get("product_id"),
             "ip": endpoint["ip"], "protocol": endpoint["version"],
             "seen": endpoint["discovered"], "read": values is not None,
             "datapoints": public_datapoints(module, values),
-        })
-    return modules
+        }
+
+    read = executor.map if executor is not None else map
+    return list(read(snapshot, feed["modules"]))
 
 
-def publish_energy(hub_id, modules, expire_after):
+def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent=None, refresh_after=30):
     if not TOPIC_ID.fullmatch(hub_id):
         raise ValueError("Identifiant de sujet MQTT invalide")
     messages = []
+    counts = {'energy': 0, 'other': 0}
+    retired_test_topics = set()
     for module in modules:
         device_id = module["id"]
         if not TOPIC_ID.fullmatch(device_id):
             continue
+        if module["product_id"] == ENERGY_PRODUCT:
+            # The old diagnostic used a different entity ID and retained its raw state.
+            retired_test_topics.update((
+                f"homeassistant/sensor/niusmart_{device_id}_test_dp101/config",
+                f"niusmart/{hub_id}/tuya/energy/test/101/state",
+            ))
         for dp in module["datapoints"]:
-            if not dp["energy_measurement"]:
-                continue
+            energy_measurement = dp["energy_measurement"]
             value = dp["value"]
-            if type(value) not in (str, int, float) or (type(value) is float and not isfinite(value)):
+            if energy_measurement:
+                if not energy_enabled:
+                    continue
+                if (module["product_id"] == ENERGY_PRODUCT
+                        and dp["device_class"] is None and dp["id"] in ("102", "104")):
+                    if not module["read"]:
+                        continue
+                    if value not in ("FORWARD", "REVERSE"):
+                        value = "Inconnu"
+                elif type(value) not in (int, float):
+                    continue
+            elif module["product_id"] == ENERGY_PRODUCT:
+                # Calibration fields and unidentified meter DPs remain on the dashboard.
+                continue
+            if type(value) not in (bool, str, int, float):
+                continue
+            if isinstance(value, float) and not isfinite(value):
+                continue
+            if isinstance(value, str) and (not value.strip() or len(value) > 255):
                 continue
             device_class = dp["device_class"]
-            if device_class is None and dp["id"] in ("102", "104"):
-                if value not in ("FORWARD", "REVERSE"):
-                    continue
-            elif type(value) not in (int, float):
-                continue
             unique_id = f"niusmart_{device_id}_dp{dp['id']}"
             state_topic = f"niusmart/{hub_id}/tuya/{device_id}/{dp['id']}/state"
             config = {
@@ -188,12 +241,35 @@ def publish_energy(hub_id, modules, expire_after):
                 config["unit_of_measurement"] = dp["unit"]
             if device_class:
                 config["device_class"] = device_class
-            if type(value) in (int, float) and dp["state_class"]:
+            if (module["product_id"] == ENERGY_PRODUCT and device_class == "power"
+                    and dp["unit"] == "W" and dp["id"] in ("101", "105", "115")):
+                config["suggested_display_precision"] = 1
+            if energy_measurement and type(value) in (int, float) and dp["state_class"]:
                 config["state_class"] = dp["state_class"]
+            payload = str(value)
+            if isinstance(value, bool):
+                payload = "on" if value else "off"
+            counts["energy" if energy_measurement else "other"] += 1
             messages.extend((
                 (f"homeassistant/sensor/{unique_id}/config", json.dumps(config), True),
-                (state_topic, str(value), False),
+                (state_topic, payload, False),
             ))
-    if messages:
-        publish_samples(mqtt_service(), messages)
-    return len(messages) // 2
+    messages[:0] = [(topic, "", True) for topic in sorted(retired_test_topics)]
+    if sent is None:
+        sent = {}
+    now = monotonic()
+    outgoing = []
+    for message in messages:
+        topic, payload, retained = message
+        previous = sent.get(topic)
+        if previous is None or previous[0] != payload:
+            outgoing.append(message)
+        elif topic not in retired_test_topics and now - previous[1] >= refresh_after:
+            outgoing.append(message)
+    if outgoing:
+        publish_samples(mqtt_service(), outgoing)
+        sent.update({topic: (payload, now) for topic, payload, _ in outgoing})
+    active_topics = {topic for topic, _, _ in messages}
+    for topic in sent.keys() - active_topics:
+        del sent[topic]
+    return counts

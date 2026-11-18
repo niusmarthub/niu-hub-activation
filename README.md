@@ -11,6 +11,13 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
+## 0.3.13 — validation sur REM-0021
+
+- Au démarrage ou avec **Redécouvrir les modules**, le hub récupère l’inventaire NiuSmart et cherche les modules autorisés sur le réseau local. Les options NiuSmart sont aussi vérifiées une fois par heure par défaut.
+- Le hub vise une lecture locale par seconde et publie les changements dans MQTT. Après une première synchronisation réussie, il peut utiliser l’inventaire enregistré pendant une coupure Internet.
+- Sur le PJ1103B, Home Assistant reçoit une précision d’une décimale pour les puissances en watts. Le sens du courant indique « Inconnu » si la lecture du compteur est disponible sans la valeur de direction. L’ancienne entité de test du DP 101 est retirée du broker.
+- Les états Tuya sont publiés en lecture seule. La commande des relais depuis NiuSmart et la migration des scripts Dometic CAN restent à valider.
+
 ## IMPORTANT avant installation
 1. Conserver la sauvegarde manuelle originale `/config/niusmart/archive/hub_config_avant_0.3.1_20261013.json` hors de portee de l'add-on.
 2. Sur un Hub deja active, ne **pas** relancer l'activation : utiliser la synchronisation avec l'identite deja enregistree.

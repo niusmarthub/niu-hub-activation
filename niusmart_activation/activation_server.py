@@ -64,6 +64,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -82,7 +83,9 @@ DASHBOARD_FILE = Path(__file__).with_name('hub_dashboard.html')
 NETBIRD_PENDING_FILE = DATA_DIR / 'netbird_pending.json'
 ADDON_OPTIONS = Path('/data/options.json')
 
-SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '60')))
+SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '3600')))
+TUYA_READ_INTERVAL = 1
+MQTT_STATE_REFRESH = 30
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
@@ -97,8 +100,13 @@ PORT = int(os.environ.get('NIU_PORT', '8099'))
 PILOT_SITE_ID = 2
 STOP = Event()
 LOCK = Lock()
-TUYA_SCAN_LOCK = Lock()
-MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None, 'energy_mqtt': 'En attente de l’inventaire'}
+DISCOVERY_LOCK = Lock()
+DISCOVERY_REQUEST = Event()
+SYNC_REQUEST = Event()
+DISCOVERY_STATUS = 'En attente'
+TUYA_TARGETS = None
+MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None, 'energy_mqtt': 'En attente de l’inventaire',
+                 'tuya_mqtt': 'En attente de l’inventaire'}
 NETBIRD_STATUS = 'Vérification en attente'
 CODE_PATTERN = re.compile(r'^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$')
 IDENTIFIER_PATTERN = re.compile(r'^niu-[a-f0-9]{32}$')
@@ -632,6 +640,8 @@ def confirm_pending():
             raise RuntimeError('Backup existant different; intervention requise')
     write_json_atomic(BACKUP_FILE, make_backup(config))
     PENDING_FILE.unlink(missing_ok=True)
+    if TUYA_DISCOVERY_ENABLED:
+        request_discovery()
     return True
 
 
@@ -669,7 +679,9 @@ def recover_if_needed():
 
 
 def sync_loop():
-    while not STOP.wait(SYNC_INTERVAL):
+    while not STOP.is_set():
+        SYNC_REQUEST.clear()
+        retry_activation = True
         try:
             config = load_active_config()
             if PENDING_FILE.exists():
@@ -677,13 +689,14 @@ def sync_loop():
                     if PENDING_FILE.exists():
                         confirm_pending()
             elif not validate_identity_for_sync(config):
-                recover_if_needed()
+                if recover_if_needed() and TUYA_DISCOVERY_ENABLED:
+                    request_discovery()
             else:
+                retry_activation = False
                 synchronize()
-        except urllib.error.HTTPError as exc:
-            diagnostic_error('sync_error', exc)
         except Exception as exc:
             diagnostic_error('sync_error', exc)
+        SYNC_REQUEST.wait(60 if retry_activation else SYNC_INTERVAL)
 
 
 def fetch_tuya_inventory():
@@ -743,53 +756,128 @@ def update_tuya_inventory(feed, scan):
     })
     detected = sum(item['discovered'] for item in modules.values())
     diagnostic('tuya_inventory', result='ok', status=f'{detected}/{len(modules)}')
-    update_module_status(feed, modules, scan.get('scanned_at'))
     return modules, f'{detected} module(s) détecté(s) sur {len(modules)} attendu(s). {note}'.strip()
 
 
-def update_module_status(feed, endpoints, scanned_at):
-    from hub_modules import publish_energy, snapshot_modules
+def update_module_status(feed, endpoints, scanned_at, executor, sent):
+    from hub_modules import publish_module_states, snapshot_modules
 
     global MODULE_STATUS
-    modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc))
     config = load_active_config()
-    options = (config.get('site_config') or {}) if validate_identity_for_sync(config) else {}
+    activated = (validate_identity_for_sync(config) and not PENDING_FILE.exists()
+                 and (feed['site_id'], feed['hub_id']) == (config['site_id'], config['device_code']))
+    if not activated:
+        return
+    modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc),
+                               executor=executor)
+    if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
+        return
+    MODULE_STATUS = {**MODULE_STATUS, 'modules': modules, 'scanned_at': scanned_at,
+                     'read_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'error': None}
+    options = config.get('site_config') or {}
     monitoring = options.get('has_power_monitoring')
-    status = 'Option non reçue' if monitoring is None else 'Mesures MQTT désactivées'
-    if monitoring == 1:
-        try:
-            count = publish_energy(feed['hub_id'], modules, expire_after=TUYA_SCAN_INTERVAL * 3)
-            status = f'{count} mesure(s) publiée(s)' if count else 'En attente de mesures utilisables'
-        except Exception as exc:
-            diagnostic_error('energy_mqtt_error', exc)
-            status = 'Publication MQTT indisponible'
-    MODULE_STATUS = {'modules': modules, 'scanned_at': scanned_at, 'error': None, 'energy_mqtt': status}
+    energy_status = 'Option non reçue' if monitoring is None else 'Mesures MQTT désactivées'
+    module_status = 'En attente d’états utilisables'
+    try:
+        counts = publish_module_states(
+            feed['hub_id'], modules, expire_after=MQTT_STATE_REFRESH * 3,
+            energy_enabled=monitoring == 1, sent=sent, refresh_after=MQTT_STATE_REFRESH,
+        )
+        if counts['other']:
+            module_status = f"{counts['other']} état(s) publié(s)"
+        if monitoring == 1:
+            energy_status = (f"{counts['energy']} mesure(s) publiée(s)" if counts['energy']
+                             else 'En attente de mesures utilisables')
+    except Exception as exc:
+        diagnostic_error('tuya_mqtt_error', exc)
+        module_status = 'Publication MQTT indisponible'
+        if monitoring == 1:
+            energy_status = module_status
+    MODULE_STATUS = {**MODULE_STATUS, 'energy_mqtt': energy_status, 'tuya_mqtt': module_status}
 
 
 def scan_tuya():
     from tuya_discovery import discover_once
+    from tuya_inventory import reconcile_modules
 
-    feed = fetch_tuya_inventory()
-    if feed is None:
+    global TUYA_TARGETS, MODULE_STATUS
+    config = load_active_config()
+    if not validate_identity_for_sync(config) or PENDING_FILE.exists():
         return None
+    cache_file = DATA_DIR / 'tuya_feed.json'
+    cached = load_json(cache_file)
+    offline = False
+    try:
+        feed = fetch_tuya_inventory()
+        if feed is None:
+            return None
+        reconcile_modules(feed, {})
+        write_json_atomic(cache_file, {'identity': config['hub_identifier'], 'feed': feed})
+    except (urllib.error.URLError, TimeoutError) as exc:
+        if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403):
+            if TUYA_TARGETS and TUYA_TARGETS[0].get('hub_id') == config['device_code']:
+                TUYA_TARGETS = None
+                MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None,
+                                 'energy_mqtt': 'Indisponible', 'tuya_mqtt': 'Indisponible'}
+            cache_file.unlink(missing_ok=True)
+            raise
+        feed = cached.get('feed') if isinstance(cached, dict) and cached.get(
+            'identity') == config['hub_identifier'] else None
+        if not isinstance(feed, dict) or (feed.get('site_id'), feed.get('hub_id')) != (
+                config['site_id'], config['device_code']):
+            raise
+        offline = True
+
     discover_once(str(DATA_DIR))
     scan = load_json(DATA_DIR / 'tuya_discovery.json')
     if not isinstance(scan, dict) or not isinstance(scan.get('devices'), dict):
         raise RuntimeError('Resultat de balayage Tuya invalide')
-    return (scan, *update_tuya_inventory(feed, scan))
+    modules, message = update_tuya_inventory(feed, scan)
+    TUYA_TARGETS = (feed, modules, scan.get('scanned_at'))
+    return ('NiuSmart inaccessible · inventaire local utilisé. ' if offline else '') + message
+
+
+def request_discovery():
+    global DISCOVERY_STATUS
+    with DISCOVERY_LOCK:
+        if DISCOVERY_REQUEST.is_set() or DISCOVERY_STATUS == 'Redécouverte en cours…':
+            return False
+        DISCOVERY_STATUS = 'Redécouverte en attente…'
+        DISCOVERY_REQUEST.set()
+        return True
 
 
 def tuya_discovery_loop():
-    global MODULE_STATUS
+    global DISCOVERY_STATUS
+    # An already activated hub requests its inventory on startup.
+    request_discovery()
     while not STOP.is_set():
+        if not DISCOVERY_REQUEST.wait(1):
+            continue
+        with DISCOVERY_LOCK:
+            DISCOVERY_REQUEST.clear()
+            DISCOVERY_STATUS = 'Redécouverte en cours…'
         try:
-            with TUYA_SCAN_LOCK:
-                scan_tuya()
+            message = scan_tuya() or 'En attente de l’activation'
         except Exception as exc:
             diagnostic_error('tuya_discovery_error', exc)
-            MODULE_STATUS = {**MODULE_STATUS, 'error': 'Actualisation indisponible · dernières données affichées'}
-        if STOP.wait(TUYA_SCAN_INTERVAL):
-            break
+            message = 'Redécouverte indisponible · consultez le journal'
+        with DISCOVERY_LOCK:
+            DISCOVERY_STATUS = message
+
+
+def tuya_state_loop():
+    sent = {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        while not STOP.is_set():
+            started = time.monotonic()
+            targets = TUYA_TARGETS
+            if targets:
+                try:
+                    update_module_status(*targets, executor, sent)
+                except Exception as exc:
+                    diagnostic_error('tuya_state_error', exc)
+            STOP.wait(max(0.1, TUYA_READ_INTERVAL - (time.monotonic() - started)))
 
 
 def netbird_enrollment(source):
@@ -869,6 +957,8 @@ def dashboard_status():
                 SITE_FLAG_FIELDS | {'toilet_count', 'door_count', 'climate_count'}
             ) if key in site},
             'netbird': NETBIRD_STATUS,
+            'discovery': DISCOVERY_STATUS,
+            'discovery_enabled': TUYA_DISCOVERY_ENABLED,
             **MODULE_STATUS,
         })
     return status
@@ -908,6 +998,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_POST(self):
+        if self.path == '/rediscover':
+            if self.headers.get('X-Niu-Hub-Request') != 'rediscover':
+                return self.send_json(403, {'success': False, 'message': 'Requête locale invalide.'})
+            if not TUYA_DISCOVERY_ENABLED or not dashboard_status()['activated']:
+                return self.send_json(409, {'success': False, 'message': 'Redécouverte indisponible.'})
+            if request_discovery():
+                SYNC_REQUEST.set()
+            return self.send_json(202, {'success': True, 'message': DISCOVERY_STATUS})
         if self.path != '/activate':
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
         try:
@@ -984,5 +1082,6 @@ if __name__ == '__main__':
     Thread(target=netbird_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
+        Thread(target=tuya_state_loop, daemon=True).start()
     print(f'Niu Hub activation listening on {BIND}:{PORT}', flush=True)
     ThreadingHTTPServer((BIND, PORT), Handler).serve_forever()
