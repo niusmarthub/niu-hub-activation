@@ -34,10 +34,17 @@ def test_energy(feed, inventory):
     if not fresh:
         raise EnergyTestError("Relance le balayage Tuya pour actualiser l’inventaire.")
 
-    name = f'{feed["hub_id"]}-ENERGY'
-    module = next((item for item in feed["modules"] if item["device_name"] == name), None)
-    if module is None:
+    # The hub's API identifier and the unit prefix used in device names can differ.
+    energy_modules = [
+        item for item in feed["modules"]
+        if (item.get("device_name") or "").strip().rsplit("-", 1)[-1].casefold() == "energy"
+    ]
+    if not energy_modules:
         raise EnergyTestError("NiuSmart ne liste pas de module ENERGY pour ce hub.")
+    if len(energy_modules) != 1:
+        raise EnergyTestError("Plusieurs modules ENERGY sont associés à ce hub.")
+    module = energy_modules[0]
+    name = module["device_name"]
     device_id = module["tuya_device_id"]
     endpoint = inventory["modules"].get(device_id, {})
     if not endpoint.get("discovered") or endpoint.get("version") != "3.5":
