@@ -9,7 +9,7 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Rotation : `key-update.php` conserve les etapes check/commit/ack. La rotation n'est pas une synchronisation ordinaire.
 - Le site 1 est refusé pendant le pilote.
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
-- Le tableau de bord est accessible depuis **Ouvrir l’interface Web** dans Home Assistant. Il affiche les options NiuSmart et les datapoints reçus ou lus localement. L’option de suivi de l’énergie active la publication MQTT des mesures d’un PJ1103B reconnu par son identifiant produit.
+- Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
 ## IMPORTANT avant installation
 1. Conserver la sauvegarde manuelle originale `/config/niusmart/archive/hub_config_avant_0.3.1_20261013.json` hors de portee de l'add-on.
