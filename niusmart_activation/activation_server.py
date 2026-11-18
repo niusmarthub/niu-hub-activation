@@ -128,7 +128,7 @@ input,button{width:100%;font-size:18px;padding:14px;border-radius:9px;margin:8px
 input{background:#ecf4f9;border:1px solid #93afc1;color:#14233c;text-align:center;text-transform:uppercase;letter-spacing:1px}
 button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}button:disabled{opacity:.5;cursor:wait}
 #msg{min-height:38px;white-space:pre-wrap;font-size:15px}
-#tuyaResults{white-space:pre-wrap;overflow-wrap:anywhere;background:#081725;padding:12px;border-radius:8px;max-height:320px;overflow:auto;font-size:13px}
+#tuyaResults,#energyDatapoints{white-space:pre-wrap;overflow-wrap:anywhere;background:#081725;padding:12px;border-radius:8px;max-height:320px;overflow:auto;font-size:13px}
 #scanMsg{min-height:24px}
 </style></head><body><main class="card">
 <img src="/logo.png" alt="NiuSmart" class="logo"><h1>Activation Niu Hub</h1>
@@ -142,6 +142,9 @@ button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}b
 <p id="scanMsg" role="status" aria-live="polite"></p><pre id="tuyaResults"></pre>
 <button id="testEnergy" type="button">Tester ENERGY via MQTT</button>
 <p id="energyMsg" role="status" aria-live="polite"></p>
+<button id="readEnergy" type="button">Lire les datapoints ENERGY</button>
+<p id="readEnergyMsg" role="status" aria-live="polite"></p>
+<pre id="energyDatapoints" hidden></pre>
 </section>
 </main><script>
 const f=document.getElementById('form'),b=document.getElementById('go'),m=document.getElementById('msg');
@@ -167,6 +170,23 @@ energyButton.addEventListener('click',async()=>{
     energyMsg.textContent=result.message;
   }catch(e){energyMsg.textContent='Le test ENERGY n’a pas pu être lancé.'}
   finally{energyButton.disabled=false}
+});
+const readEnergy=document.getElementById('readEnergy'),readEnergyMsg=document.getElementById('readEnergyMsg');
+const energyDatapoints=document.getElementById('energyDatapoints');
+readEnergy.addEventListener('click',async()=>{
+  readEnergy.disabled=true;
+  readEnergyMsg.textContent='Lecture locale d’ENERGY en cours…';
+  energyDatapoints.hidden=true;
+  try{
+    const response=await fetch('/tuya/energy-datapoints',{method:'POST',headers:{'Content-Type':'application/json'}});
+    const result=await response.json();
+    readEnergyMsg.textContent=result.message;
+    if(response.ok && result.success){
+      energyDatapoints.textContent=JSON.stringify(result.datapoints,null,2);
+      energyDatapoints.hidden=false;
+    }
+  }catch(e){readEnergyMsg.textContent='Le diagnostic ENERGY n’a pas pu être lancé.'}
+  finally{readEnergy.disabled=false}
 });
 </script></body></html>'''
 
@@ -861,16 +881,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def handle_energy_test(self):
+    def handle_energy_test(self, *, read_only=False):
         if self.headers.get_content_type() != 'application/json':
             return self.send_json(415, {'success': False, 'message': 'Requête JSON requise.'})
         if not TUYA_SCAN_LOCK.acquire(blocking=False):
             return self.send_json(409, {'success': False, 'message': 'Un test ou un balayage est déjà en cours.'})
         try:
-            from energy_mqtt_test import EnergyTestError, test_energy
+            from energy_mqtt_test import EnergyTestError, read_energy_datapoints, test_energy
 
             try:
-                message = test_energy(fetch_tuya_inventory(), load_json(TUYA_INVENTORY_FILE))
+                feed = fetch_tuya_inventory()
+                inventory = load_json(TUYA_INVENTORY_FILE)
+                if read_only:
+                    _, datapoints = read_energy_datapoints(feed, inventory)
+                    return self.send_json(200, {
+                        'success': True,
+                        'message': f'ENERGY a renvoyé {len(datapoints)} datapoint(s).',
+                        'datapoints': datapoints,
+                    })
+                message = test_energy(feed, inventory)
             except EnergyTestError as exc:
                 return self.send_json(409, {'success': False, 'message': str(exc)})
             diagnostic('tuya_energy_mqtt_test', result='ok')
@@ -884,6 +913,8 @@ class Handler(BaseHTTPRequestHandler):
             TUYA_SCAN_LOCK.release()
 
     def do_POST(self):
+        if self.path == '/tuya/energy-datapoints':
+            return self.handle_energy_test(read_only=True)
         if self.path == '/tuya/energy-test':
             return self.handle_energy_test()
         if self.path == '/tuya/scan':

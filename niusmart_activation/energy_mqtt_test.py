@@ -1,4 +1,4 @@
-"""Publish one read-only Tuya ENERGY sample for the REM-0021 pilot."""
+"""Read Tuya ENERGY datapoints and publish one sample for the MQTT pilot."""
 
 import json
 import os
@@ -52,7 +52,7 @@ def select_measurement(datapoints, values):
     raise EnergyTestError(message)
 
 
-def test_energy(feed, inventory):
+def read_energy_datapoints(feed, inventory):
     if not feed or not isinstance(inventory, dict) or feed["hub_id"] != inventory.get("hub_id"):
         raise EnergyTestError("Lance d’abord un balayage Tuya sur ce hub.")
     try:
@@ -73,13 +73,11 @@ def test_energy(feed, inventory):
     if len(energy_modules) != 1:
         raise EnergyTestError("Plusieurs modules ENERGY sont associés à ce hub.")
     module = energy_modules[0]
-    name = module["device_name"]
     device_id = module["tuya_device_id"]
     endpoint = inventory["modules"].get(device_id, {})
     if not endpoint.get("discovered") or endpoint.get("version") != "3.5":
         raise EnergyTestError("ENERGY doit être détecté en protocole 3.5 avant le test.")
 
-    broker = mqtt_service()
     device = tinytuya.Device(device_id, endpoint["ip"], module["local_key"], version=3.5)
     device.set_socketTimeout(3)
     device.set_socketRetryLimit(1)
@@ -87,20 +85,25 @@ def test_energy(feed, inventory):
     values = reply.get("dps") if isinstance(reply, dict) else None
     if not isinstance(values, dict):
         raise EnergyTestError("ENERGY n’a renvoyé aucune mesure locale exploitable.")
+    return module, values
 
+
+def test_energy(feed, inventory):
+    module, values = read_energy_datapoints(feed, inventory)
     dp_id, label, value = select_measurement(module["datapoints"], values)
 
     # The inventory feed doesn't include conversion factors, so label the value as raw.
+    device_id = module["tuya_device_id"]
     unique_id = f"niusmart_{device_id}_test_dp{dp_id}"
     state_topic = f"niusmart/{feed['hub_id']}/tuya/energy/test/{dp_id}/state"
     discovery = {
         "name": f"Test {label} (valeur brute)",
         "unique_id": unique_id,
         "state_topic": state_topic,
-        "device": {"identifiers": [f"niusmart_tuya_{device_id}"], "name": name},
+        "device": {"identifiers": [f"niusmart_tuya_{device_id}"], "name": module["device_name"]},
         "expire_after": 300,
     }
-    publish_sample(broker, f"homeassistant/sensor/{unique_id}/config", discovery, value)
+    publish_sample(mqtt_service(), f"homeassistant/sensor/{unique_id}/config", discovery, value)
     return f"MQTT a reçu la valeur brute {value} pour le datapoint {dp_id} d’ENERGY."
 
 
