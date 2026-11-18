@@ -59,9 +59,11 @@ import re
 import secrets
 import ssl
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -78,8 +80,11 @@ LOGO_FILE = Path(__file__).with_name('logo.png')
 ICON_FILE = Path(__file__).with_name('icon.png')
 
 SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '60')))
-TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '0') == '1'
+TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
+TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
+TUYA_ACTIVE_ATTEMPT_FILE = DATA_DIR / 'tuya_active_attempt.json'
+TUYA_ACTIVE_INTERVAL = 3600
 DEFAULT_BASE_URL = 'https://niusmart.com'
 ACTIVATION_URL = os.environ.get('NIU_ACTIVATION_URL', DEFAULT_BASE_URL + '/hub-activation.php')
 KEY_UPDATE_URL = os.environ.get('NIU_KEY_UPDATE_URL', DEFAULT_BASE_URL + '/key-update.php')
@@ -132,7 +137,7 @@ button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}b
 <button id="go">Activer</button></form><p id="msg" role="status" aria-live="polite"></p>
 <section aria-labelledby="tuyaTitle" style="margin-top:24px;border-top:1px solid #28516b;padding-top:18px">
 <h2 id="tuyaTitle">Diagnostic de détection Tuya</h2>
-<p>Balayage du réseau local en lecture seule. Aucune commande n’est envoyée aux modules.</p>
+<p>Recherche les modules Tuya sur le réseau local sans modifier leurs états.</p>
 <button id="scanTuya" type="button">Balayer le réseau Tuya</button>
 <p id="scanMsg" role="status" aria-live="polite"></p><pre id="tuyaResults"></pre>
 </section>
@@ -147,8 +152,8 @@ else if(x.pending){f.hidden=true;m.textContent='Configuration reçue; confirmati
 else if(x.recovery_needed){f.hidden=true;m.textContent='Configuration incomplète. Récupération ou intervention requise.'}}).catch(()=>{});
 const scanButton=document.getElementById('scanTuya'),scanMsg=document.getElementById('scanMsg'),scanResults=document.getElementById('tuyaResults');
 scanButton.addEventListener('click',async()=>{scanButton.disabled=true;scanMsg.textContent='Balayage en cours…';scanResults.textContent='';
-try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=`${x.count} module(s) détecté(s).`;
-scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\\nIP: ${d.ip}\\nVersion: ${d.version||'inconnue'}`).join('\\n\\n'):'Aucun module détecté.';
+try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=x.message||`${x.count} module(s) détecté(s).`;
+scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\\n${d.last_known?'Dernière IP connue':'IP'}: ${d.ip}\\nVersion: ${d.version||'inconnue'}`).join('\\n\\n'):'Aucun module détecté.';
 }catch(e){scanMsg.textContent=e.message||'Échec du balayage.'}finally{scanButton.disabled=false}});
 </script></body></html>'''
 
@@ -711,13 +716,94 @@ def sync_loop():
             diagnostic_error('sync_error', exc)
 
 
-def tuya_discovery_loop():
-    # Isolated from activation and key rotation. No commands are sent to devices.
+def fetch_tuya_inventory():
+    config = load_active_config()
+    if PENDING_FILE.exists() or not validate_identity_for_sync(config):
+        return None
+
+    url = validate_base_url(config['api_base_url']) + '/hub_tuya_api.php'
+    request = urllib.request.Request(url, headers={'Accept': 'application/json'})
+    request.add_unredirected_header('X-API-Key', config['api_key'])
+    with urllib.request.urlopen(request, timeout=15, context=ssl.create_default_context()) as response:
+        if response.geturl() != url:
+            raise RuntimeError('Redirection du flux Tuya refusee')
+        feed = json.load(response)
+    if (not isinstance(feed, dict) or feed.get('site_id') != config['site_id']
+            or feed.get('hub_id') != config['device_code']):
+        raise RuntimeError('Identite du flux Tuya invalide')
+    return feed
+
+
+def update_tuya_inventory(feed, scan):
+    from tuya_discovery import active_scan_targets, discover_missing
+    from tuya_inventory import reconcile_modules
+
+    discovered = scan['devices']
+    previous = load_json(TUYA_INVENTORY_FILE)
+    known = previous.get('modules') if isinstance(previous, dict) and previous.get('hub_id') == feed['hub_id'] else None
+    modules = reconcile_modules(feed, discovered, known)
+    key_counts = Counter(row['local_key'] for row in feed['modules'] if is_nonblank(row.get('local_key')))
+    missing = [
+        {'id': row['tuya_device_id'], 'key': row['local_key'], 'ip': modules[row['tuya_device_id']]['ip']}
+        for row in feed['modules']
+        if not modules[row['tuya_device_id']]['discovered']
+        and is_nonblank(row.get('local_key')) and key_counts[row['local_key']] == 1
+    ]
+    note = ''
+    if missing:
+        try:
+            attempt = load_json(TUYA_ACTIVE_ATTEMPT_FILE)
+            now = time.time()
+            if isinstance(attempt, dict) and now - attempt.get('at', 0) < TUYA_ACTIVE_INTERVAL:
+                note = 'Le balayage actif a déjà été tenté dans la dernière heure.'
+            else:
+                anchor_ips = [item['ip'] for item in modules.values() if item['discovered']]
+                targets = active_scan_targets({entry['ip'] for entry in discovered.values()}, anchor_ips)
+                if targets:
+                    write_json_atomic(TUYA_ACTIVE_ATTEMPT_FILE, {'at': now})
+                    discovered.update(discover_missing(missing, targets))
+                    modules = reconcile_modules(feed, discovered, known)
+                else:
+                    note = 'Le réseau local des modules manquants n’a pas pu être confirmé.'
+        except Exception as exc:
+            diagnostic_error('tuya_active_discovery_error', exc)
+            note = 'Le balayage actif a rencontré une erreur. Consultez le journal de l’application.'
+    write_json_atomic(TUYA_INVENTORY_FILE, {
+        'hub_id': feed['hub_id'], 'scanned_at': scan.get('scanned_at'), 'modules': modules,
+    })
+    detected = sum(item['discovered'] for item in modules.values())
+    diagnostic('tuya_inventory', result='ok', status=f'{detected}/{len(modules)}')
+    return modules, f'{detected} module(s) détecté(s) sur {len(modules)} attendu(s). {note}'.strip()
+
+
+def scan_tuya(manual=False):
     from tuya_discovery import discover_once
+
+    note = ''
+    try:
+        feed = fetch_tuya_inventory()
+    except Exception as exc:
+        if not manual:
+            raise
+        diagnostic_error('tuya_inventory_feed_error', exc)
+        feed = None
+        note = 'Inventaire NiuSmart indisponible. Seul le balayage habituel a pu être effectué.'
+    if feed is None and not manual:
+        return None
+    discover_once(str(DATA_DIR))
+    scan = load_json(DATA_DIR / 'tuya_discovery.json')
+    if not isinstance(scan, dict) or not isinstance(scan.get('devices'), dict):
+        raise RuntimeError('Resultat de balayage Tuya invalide')
+    if feed is None:
+        return scan, {}, note
+    return (scan, *update_tuya_inventory(feed, scan))
+
+
+def tuya_discovery_loop():
     while not STOP.is_set():
         try:
-            count = discover_once(str(DATA_DIR))
-            diagnostic('tuya_discovery', result='ok', status='devices_found' if count else 'none')
+            with TUYA_SCAN_LOCK:
+                scan_tuya()
         except Exception as exc:
             diagnostic_error('tuya_discovery_error', exc)
         if STOP.wait(TUYA_SCAN_INTERVAL):
@@ -767,10 +853,7 @@ class Handler(BaseHTTPRequestHandler):
             if not TUYA_SCAN_LOCK.acquire(blocking=False):
                 return self.send_json(409, {'success':False,'message':'Un balayage est déjà en cours.'})
             try:
-                from tuya_discovery import discover_once
-                discover_once(str(DATA_DIR))
-                result_file = DATA_DIR / 'tuya_discovery.json'
-                result = json.loads(result_file.read_text(encoding='utf-8'))
+                result, modules, message = scan_tuya(manual=True)
                 raw_devices = result.get('devices', {}) if isinstance(result, dict) else {}
                 devices = []
                 if isinstance(raw_devices, dict):
@@ -781,9 +864,13 @@ class Handler(BaseHTTPRequestHandler):
                         if isinstance(ip, str) and ip:
                             version = info.get('version')
                             devices.append({'device_id':device_id,'ip':ip,'version':version if isinstance(version, str) else None})
+                devices.extend(
+                    {'device_id': device_id, 'ip': info['ip'], 'version': info['version'], 'last_known': True}
+                    for device_id, info in modules.items() if not info['discovered'] and info['ip']
+                )
                 devices.sort(key=lambda item: item['device_id'])
                 diagnostic('tuya_discovery_manual', result='ok', status='devices_found' if devices else 'none')
-                return self.send_json(200, {'success':True,'scanned_at':result.get('scanned_at'),'count':len(devices),'devices':devices})
+                return self.send_json(200, {'success':True,'scanned_at':result.get('scanned_at'),'count':len(raw_devices),'devices':devices,'message':message})
             except Exception as exc:
                 diagnostic_error('tuya_discovery_manual_error', exc)
                 return self.send_json(500, {'success':False,'message':'Balayage impossible. Consultez le journal de l’application.'})

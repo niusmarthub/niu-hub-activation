@@ -23,15 +23,18 @@ def reconcile_modules(feed, discovered, previous=None):
             raise ValueError("Invalid or duplicate Tuya device ID")
         found = discovered.get(device_id)
         ip = found.get("ip") if isinstance(found, dict) else None
+        version = found.get("version") if isinstance(found, dict) else None
         if not isinstance(ip, str) or not ip:
             old = previous.get(device_id)
             ip = old.get("ip") if isinstance(old, dict) else None
+            version = old.get("version") if isinstance(old, dict) else None
             online = False
         else:
             online = True  # Seen by LAN discovery, not a verified connection
         result[device_id] = {
             "device_name": module.get("device_name"),
             "ip": ip,
+            "version": version,
             "discovered": online,
             "datapoint_count": len(module.get("datapoints", []))
             if isinstance(module.get("datapoints"), list) else 0,
