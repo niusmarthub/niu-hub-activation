@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.3.13"
+version: "0.3.14"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
@@ -11,6 +11,7 @@ hassio_api: true
 hassio_role: manager
 # Acces aux broadcasts LAN Tuya (UDP 6666/6667/7000).
 host_network: true
+host_dbus: true
 arch:
   - aarch64
   - armv7
@@ -21,6 +22,7 @@ ports_description:
   8099/tcp: "Interface d'activation Niu Hub (reseau local uniquement)"
 options: {}
 schema:
+  solar_bluetooth_address: str?
   netbird_setup_key: password?
   netbird_repository: url?
 services:

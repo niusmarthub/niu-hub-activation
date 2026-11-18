@@ -51,6 +51,7 @@ Aucune dependance Python tierce. Executer dans le conteneur de l'add-on HA OS,
 jamais directement dans le shell de l'hote Home Assistant.
 """
 
+import asyncio
 import json
 import traceback
 from datetime import datetime, timezone
@@ -880,6 +881,46 @@ def tuya_state_loop():
             STOP.wait(max(0.1, TUYA_READ_INTERVAL - (time.monotonic() - started)))
 
 
+SOLAR_STATUS = 'En attente de la configuration du site'
+
+
+def solar_enabled(config):
+    return (validate_identity_for_sync(config) and not PENDING_FILE.exists()
+            and (config.get('site_config') or {}).get('has_solar_panels') == 1)
+
+
+async def solar_loop():
+    from hub_solar import publish_solar, read_solar
+
+    global SOLAR_STATUS
+    legacy = SHARED_FILE.parent.parent / 'custom_components' / 'eco_worthy'
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            if not solar_enabled(config):
+                SOLAR_STATUS = 'Désactivé'
+            elif legacy.exists():
+                SOLAR_STATUS = 'Intégration Home Assistant existante · lecteur de l’application en pause'
+            else:
+                options = load_json(ADDON_OPTIONS) or {}
+                address = (options.get('solar_bluetooth_address') or '').strip()
+                try:
+                    values = await read_solar(address)
+                except RuntimeError as exc:
+                    SOLAR_STATUS = str(exc)
+                else:
+                    current = load_active_config()
+                    if (solar_enabled(current) and not legacy.exists()
+                            and current['hub_identifier'] == config['hub_identifier']
+                            and current['device_code'] == config['device_code']):
+                        await asyncio.to_thread(publish_solar, config['device_code'], values)
+                        SOLAR_STATUS = '4 mesures disponibles dans MQTT'
+        except Exception as exc:
+            diagnostic_error('solar_read_or_publish_error', exc)
+            SOLAR_STATUS = 'Lecture Bluetooth ou publication MQTT indisponible · consultez le journal'
+        await asyncio.sleep(30)
+
+
 def netbird_enrollment(source):
     if not isinstance(source, dict):
         return {}
@@ -957,6 +998,7 @@ def dashboard_status():
                 SITE_FLAG_FIELDS | {'toilet_count', 'door_count', 'climate_count'}
             ) if key in site},
             'netbird': NETBIRD_STATUS,
+            'solar': SOLAR_STATUS,
             'discovery': DISCOVERY_STATUS,
             'discovery_enabled': TUYA_DISCOVERY_ENABLED,
             **MODULE_STATUS,
@@ -1080,6 +1122,7 @@ if __name__ == '__main__':
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
+    Thread(target=asyncio.run, args=(solar_loop(),), daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
         Thread(target=tuya_state_loop, daemon=True).start()

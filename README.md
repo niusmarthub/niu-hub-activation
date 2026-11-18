@@ -11,6 +11,13 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
+## 0.3.14 — pilote solaire ECO-WORTHY
+
+- L’option de site **Panneaux solaires** lance la lecture Bluetooth sur un Hub activé. L’application détecte un adaptateur MPPT-BT02. Si plusieurs sont présents, renseigner son adresse dans l’option `solar_bluetooth_address` de l’application.
+- Le broker MQTT du Supervisor reçoit quatre capteurs en lecture seule, avec découverte Home Assistant. La tension de sortie LOAD est lue au registre `0x0005`.
+- Sur un Hub équipé de l’ancienne intégration `custom_components/eco_worthy`, le lecteur de l’application reste en pause pour éviter deux connexions concurrentes. Planifier le retrait de l’ancienne intégration et de son entrée YAML lors de la migration.
+- Le pilote requiert un adaptateur Bluetooth local et le service MQTT du Supervisor. Valider la détection et les quatre capteurs sur le Hub pilote avant le déploiement.
+
 ## 0.3.13 — validation sur REM-0021
 
 - Au démarrage ou avec **Redécouvrir les modules**, le hub récupère l’inventaire NiuSmart et cherche les modules autorisés sur le réseau local. Les options NiuSmart sont aussi vérifiées une fois par heure par défaut.

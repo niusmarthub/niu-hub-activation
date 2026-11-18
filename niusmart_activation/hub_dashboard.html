@@ -19,6 +19,7 @@
     .panel { background: #10263b; border: 1px solid #294963; border-radius: 14px; padding: 18px; margin-bottom: 14px; }
     .layout { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
     .panel > * + * { margin-top: 12px; }
+    .line[hidden] { display: none; }
     .line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
     form { max-width: 390px; }
     label { display: block; margin-bottom: 8px; }
@@ -72,6 +73,7 @@
           <dl>
             <div class="line"><dt>NetBird</dt><dd id="netbird"></dd></div>
             <div class="line"><dt>États des modules Tuya dans MQTT</dt><dd id="tuya-mqtt"></dd></div>
+            <div class="line" id="solar-line" hidden><dt>Solaire ECO-WORTHY</dt><dd id="solar"></dd></div>
             <div class="line"><dt>Mesures d’énergie MQTT</dt><dd id="mqtt"></dd></div>
           </dl>
         </section>
@@ -177,6 +179,8 @@
       node('netbird').textContent = data.netbird;
       node('tuya-mqtt').textContent = data.tuya_mqtt;
       node('mqtt').textContent = data.energy_mqtt;
+      node('solar-line').hidden = !data.options.has_solar_panels;
+      node('solar').textContent = data.solar;
       node('moduleCount').textContent = data.scanned_at ?
         `${data.modules.filter(module => module.seen).length} détecté(s) / ${data.modules.length} reçu(s)` : '';
       node('inventoryStatus').textContent = data.error || (data.scanned_at ?
