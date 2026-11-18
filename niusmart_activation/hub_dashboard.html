@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Niu Hub Activation</title>
+  <link rel="icon" href="/icon.png" type="image/png">
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #eaf2f8; background: #081726; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { max-width: 960px; padding: 28px 18px; margin: auto; }
+    header { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+    header img { width: 150px; height: auto; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 1.65rem; }
+    h2 { font-size: 1.15rem; }
+    p, small { color: #bed0df; }
+    .panel { background: #10263b; border: 1px solid #294963; border-radius: 14px; padding: 18px; margin-bottom: 14px; }
+    .layout { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+    .panel > * + * { margin-top: 12px; }
+    .line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    form { max-width: 390px; }
+    label { display: block; margin-bottom: 8px; }
+    input, button { font: inherit; border: 1px solid #416984; border-radius: 8px; padding: 10px 12px; }
+    input { width: 100%; text-transform: uppercase; background: #081726; }
+    button { margin-top: 10px; color: #071522; background: #6addff; font-weight: 650; cursor: pointer; }
+    button:disabled { opacity: .65; }
+    :focus-visible { outline: 2px solid #6addff; outline-offset: 3px; }
+    dl { margin-bottom: 0; }
+    dt, dd { margin: 0; }
+    dl .line + .line { margin-top: 7px; }
+    details { border: 1px solid #294963; border-radius: 9px; padding: 12px; }
+    details + details { margin-top: 10px; }
+    summary { cursor: pointer; font-weight: 650; }
+    summary small { font-weight: 400; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 10px; }
+    th, td { padding: 7px 8px; border-bottom: 1px solid #294963; overflow-wrap: anywhere; }
+    th { font-size: .875rem; color: #bed0df; }
+    td:first-child { white-space: nowrap; width: 4rem; }
+    td:last-child { max-width: 290px; }
+    .muted { font-size: .895rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <img src="/logo.png" alt="NiuSmart">
+      <h1>Niu Hub Activation</h1>
+    </header>
+    <section class="panel" aria-labelledby="hubTitle">
+      <div class="line">
+        <h2 id="hubTitle">État du hub</h2>
+        <strong id="hubState" role="status">Vérification en cours…</strong>
+      </div>
+      <form id="activation" hidden>
+        <label for="code">Code d’activation NiuSmart</label>
+        <input id="code" placeholder="ABCD-1234-ABCD-1234" maxlength="19" autocomplete="off" required>
+        <button type="submit">Activer le hub</button>
+      </form>
+      <p id="message" role="status" hidden></p>
+    </section>
+    <div id="dashboard" hidden>
+      <div class="layout">
+        <section class="panel" aria-labelledby="optionsTitle">
+          <h2 id="optionsTitle">Options NiuSmart</h2>
+          <dl id="options"></dl>
+        </section>
+        <section class="panel" aria-labelledby="servicesTitle">
+          <h2 id="servicesTitle">Services</h2>
+          <dl>
+            <div class="line"><dt>NetBird</dt><dd id="netbird"></dd></div>
+            <div class="line"><dt>Mesures d’énergie MQTT</dt><dd id="mqtt"></dd></div>
+          </dl>
+        </section>
+      </div>
+      <section class="panel" aria-labelledby="modulesTitle">
+        <div class="line">
+          <h2 id="modulesTitle">Modules NiuSmart</h2>
+          <small id="moduleCount"></small>
+        </div>
+        <p id="inventoryStatus" class="muted"></p>
+        <div id="modules"></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const node = id => document.getElementById(id);
+    const activation = node('activation');
+    const button = activation.querySelector('button');
+    const message = node('message');
+    const optionsNames = {
+      active: 'Site actif',
+      toilet_count: 'Toilettes',
+      door_count: 'Portes',
+      climate_count: 'Climatiseurs',
+      has_fresh_water: 'Eau propre',
+      has_waste_water: 'Eaux usées',
+      has_water_control: 'Contrôle de l’eau',
+      has_exterior_lighting: 'Éclairage extérieur',
+      has_power_monitoring: 'Suivi de l’énergie',
+      has_solar_panels: 'Panneaux solaires',
+    };
+    let inventoryVersion;
+
+    function element(tag, value) {
+      const item = document.createElement(tag);
+      if (value != null) item.textContent = value;
+      return item;
+    }
+
+    function renderModules(modules) {
+      const container = node('modules');
+      const expanded = new Set([...container.querySelectorAll('details[open]')].map(item => item.dataset.id));
+      container.replaceChildren();
+      for (const module of modules) {
+        const entry = element('details');
+        entry.dataset.id = module.id;
+        entry.open = expanded.has(module.id);
+        const heading = element('summary', module.name + ' · ');
+        heading.append(element('small', module.read ? 'Lecture disponible' :
+          module.seen ? 'Détecté · lecture indisponible' : 'Non détecté'));
+        entry.append(heading);
+        const description = [module.product, module.product_id, module.ip, module.protocol].filter(Boolean).join(' · ');
+        if (description) entry.append(element('small', description));
+        if (!module.datapoints.length) {
+          entry.append(element('p', 'Aucun datapoint disponible.'));
+        } else {
+          const wrapper = element('div');
+          wrapper.className = 'table-wrap';
+          const table = element('table');
+          const labels = table.createTHead().insertRow();
+          for (const label of ['DP', 'Nom', 'Valeur', 'Valeur brute']) labels.append(element('th', label));
+          const body = table.createTBody();
+          for (const dp of module.datapoints) {
+            const row = body.insertRow();
+            const value = dp.value == null ? '—' : typeof dp.value === 'object' ?
+              JSON.stringify(dp.value) : String(dp.value);
+            const raw = dp.raw == null ? '—' : typeof dp.raw === 'object' ?
+              JSON.stringify(dp.raw) : String(dp.raw);
+            const label = dp.name + (dp.relay_candidate ? ' · relais à valider' : '');
+            for (const cell of [dp.id, label, value + (dp.unit && dp.value != null ? ' ' + dp.unit : ''), raw]) {
+              row.append(element('td', cell));
+            }
+          }
+          wrapper.append(table);
+          entry.append(wrapper);
+        }
+        container.append(entry);
+      }
+    }
+
+    async function refreshStatus() {
+      const response = await fetch('/status', {cache: 'no-store'});
+      if (!response.ok) throw new Error('État du hub indisponible.');
+      const data = await response.json();
+      activation.hidden = data.activated || data.pending || data.recovery_needed;
+      node('dashboard').hidden = !data.activated;
+      node('hubState').textContent = data.activated ? `Activé · ${data.hub}` :
+        data.pending ? 'Confirmation en attente' :
+        data.recovery_needed ? 'Récupération requise' : 'Non activé';
+      if (!data.activated) return;
+
+      node('options').replaceChildren(...Object.entries(optionsNames).map(([key, label]) => {
+        const row = element('div');
+        row.className = 'line';
+        const value = data.options[key];
+        row.append(element('dt', label), element('dd', value == null ? 'Non reçu' :
+          key.endsWith('_count') ? value : value ? 'Activé' : 'Désactivé'));
+        return row;
+      }));
+      node('netbird').textContent = data.netbird;
+      node('mqtt').textContent = data.energy_mqtt;
+      node('moduleCount').textContent = data.scanned_at ?
+        `${data.modules.filter(module => module.seen).length} détecté(s) / ${data.modules.length} reçu(s)` : '';
+      node('inventoryStatus').textContent = data.error || (data.scanned_at ?
+        `Dernier balayage · ${new Date(data.scanned_at).toLocaleString('fr-CA')}` : 'Inventaire en attente');
+      if (inventoryVersion !== data.scanned_at) {
+        renderModules(data.modules);
+        inventoryVersion = data.scanned_at;
+      }
+    }
+
+    activation.addEventListener('submit', async event => {
+      event.preventDefault();
+      button.disabled = true;
+      message.hidden = false;
+      message.textContent = 'Activation en cours…';
+      try {
+        const response = await fetch('/activate', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({code: node('code').value.trim().toUpperCase()}),
+        });
+        const data = await response.json();
+        message.textContent = data.message;
+        if (data.success) {
+          node('code').value = '';
+          await refreshStatus();
+        }
+      } catch {
+        message.textContent = 'Connexion au service local impossible.';
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    async function refreshLoop() {
+      try {
+        await refreshStatus();
+      } catch {
+        node('hubState').textContent = 'État du hub indisponible';
+      }
+      setTimeout(refreshLoop, 15000);
+    }
+    refreshLoop();
+  </script>
+</body>
+</html>

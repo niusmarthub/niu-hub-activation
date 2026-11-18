@@ -8,7 +8,7 @@ ordinaire en activation, rotation de cle ou changement de serveur.
 MODE 1 - ACTIVATION (operationnel, seulement pour le site pilote REM-0021)
     POST /activate -> NiuSmart action=activate, puis action=confirm.
     Exige TOUS les champs obligatoires de la configuration du site avant
-    d'ecrire hub_config.json. Aucune activation n'ecrase un fichier existant.
+    d'ecrire hub_config.json. Une activation ne remplace pas un hub configure.
     La cle de secours est enregistree APRES confirmation de NiuSmart.
 
 MODE 2 - MISE A JOUR (operationnel)
@@ -78,6 +78,9 @@ ROTATION_FILE = DATA_DIR / 'key_rotation_pending.json'
 IDENTIFIER_FILE = DATA_DIR / 'hub_identifier'
 LOGO_FILE = Path(__file__).with_name('logo.png')
 ICON_FILE = Path(__file__).with_name('icon.png')
+DASHBOARD_FILE = Path(__file__).with_name('hub_dashboard.html')
+NETBIRD_PENDING_FILE = DATA_DIR / 'netbird_pending.json'
+ADDON_OPTIONS = Path('/data/options.json')
 
 SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '60')))
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
@@ -95,6 +98,8 @@ PILOT_SITE_ID = 2
 STOP = Event()
 LOCK = Lock()
 TUYA_SCAN_LOCK = Lock()
+MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None, 'energy_mqtt': 'En attente de l’inventaire'}
+NETBIRD_STATUS = 'Vérification en attente'
 CODE_PATTERN = re.compile(r'^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$')
 IDENTIFIER_PATTERN = re.compile(r'^niu-[a-f0-9]{32}$')
 
@@ -112,85 +117,6 @@ SITE_FIELDS = SITE_TEXT_FIELDS | SITE_INTEGER_FIELDS | SITE_FLAG_FIELDS
 CONFIG_FIELDS = frozenset({
     'site_id', 'device_code', 'api_key', 'api_base_url', 'hub_identifier', 'site_config',
 })
-
-HTML = '''<!doctype html>
-<html lang="fr"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#071522"><title>NiuSmart | Activation Niu Hub</title>
-<link rel="icon" href="/icon.png" type="image/png">
-<style>
-:root{color-scheme:dark}*{box-sizing:border-box}
-body{font-family:Arial,Helvetica,sans-serif;background:linear-gradient(145deg,#071522,#102b42);color:#e9f4fc;display:grid;place-items:center;min-height:100vh;margin:0;padding:16px}
-.card{background:#12263b;border:1px solid #28516b;border-radius:18px;padding:30px;max-width:450px;width:100%;box-shadow:0 14px 45px #0005}
-.logo{display:block;max-width:240px;width:78%;height:auto;margin:0 auto 24px}
-h1{margin:0 0 10px;font-size:25px;color:white}p{line-height:1.5;color:#c6d9e7}
-input,button{width:100%;font-size:18px;padding:14px;border-radius:9px;margin:8px 0}
-input{background:#ecf4f9;border:1px solid #93afc1;color:#14233c;text-align:center;text-transform:uppercase;letter-spacing:1px}
-button{background:#009bc9;color:white;border:0;cursor:pointer;font-weight:bold}button:disabled{opacity:.5;cursor:wait}
-#msg{min-height:38px;white-space:pre-wrap;font-size:15px}
-#tuyaResults,#energyDatapoints{white-space:pre-wrap;overflow-wrap:anywhere;background:#081725;padding:12px;border-radius:8px;max-height:320px;overflow:auto;font-size:13px}
-#scanMsg{min-height:24px}
-</style></head><body><main class="card">
-<img src="/logo.png" alt="NiuSmart" class="logo"><h1>Activation Niu Hub</h1>
-<p>Entrez le code d'activation affiché dans NiuSmart.</p>
-<form id="form"><input id="code" maxlength="19" placeholder="ABCD-1234-ABCD-1234" autocomplete="off" required aria-label="Code d'activation">
-<button id="go">Activer</button></form><p id="msg" role="status" aria-live="polite"></p>
-<section aria-labelledby="tuyaTitle" style="margin-top:24px;border-top:1px solid #28516b;padding-top:18px">
-<h2 id="tuyaTitle">Diagnostic de détection Tuya</h2>
-<p>Recherche les modules Tuya sur le réseau local sans modifier leurs états.</p>
-<button id="scanTuya" type="button">Balayer le réseau Tuya</button>
-<p id="scanMsg" role="status" aria-live="polite"></p><pre id="tuyaResults"></pre>
-<button id="testEnergy" type="button">Tester ENERGY via MQTT</button>
-<p id="energyMsg" role="status" aria-live="polite"></p>
-<button id="readEnergy" type="button">Lire les datapoints ENERGY</button>
-<p id="readEnergyMsg" role="status" aria-live="polite"></p>
-<pre id="energyDatapoints" hidden></pre>
-</section>
-</main><script>
-const f=document.getElementById('form'),b=document.getElementById('go'),m=document.getElementById('msg');
-f.addEventListener('submit',async e=>{e.preventDefault();b.disabled=true;m.textContent='Activation en cours…';
-try{const r=await fetch('/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:document.getElementById('code').value.trim().toUpperCase()})});
-const x=await r.json();m.textContent=x.message||'Réponse inconnue';if(x.success){f.hidden=true;}}
-catch(e){m.textContent='Connexion au service local impossible.'}finally{b.disabled=false}});
-fetch('/status').then(r=>r.json()).then(x=>{if(x.activated){f.hidden=true;m.textContent='Ce Niu Hub est déjà activé.'}
-else if(x.pending){f.hidden=true;m.textContent='Configuration reçue; confirmation en attente.'}
-else if(x.recovery_needed){f.hidden=true;m.textContent='Configuration incomplète. Récupération ou intervention requise.'}}).catch(()=>{});
-const scanButton=document.getElementById('scanTuya'),scanMsg=document.getElementById('scanMsg'),scanResults=document.getElementById('tuyaResults');
-scanButton.addEventListener('click',async()=>{scanButton.disabled=true;scanMsg.textContent='Balayage en cours…';scanResults.textContent='';
-try{const r=await fetch('/tuya/scan',{method:'POST',headers:{'Accept':'application/json'}});const x=await r.json();if(!r.ok||!x.success)throw new Error(x.message||'Scan impossible');scanMsg.textContent=x.message||`${x.count} module(s) détecté(s).`;
-scanResults.textContent=x.devices.length?x.devices.map(d=>`ID: ${d.device_id}\\n${d.last_known?'Dernière IP connue':'IP'}: ${d.ip}\\nVersion: ${d.version||'inconnue'}`).join('\\n\\n'):'Aucun module détecté.';
-}catch(e){scanMsg.textContent=e.message||'Échec du balayage.'}finally{scanButton.disabled=false}});
-const energyButton=document.getElementById('testEnergy'),energyMsg=document.getElementById('energyMsg');
-energyButton.addEventListener('click',async()=>{
-  energyButton.disabled=true;
-  energyMsg.textContent='Lecture d’ENERGY et publication MQTT en cours…';
-  try{
-    const response=await fetch('/tuya/energy-test',{method:'POST',headers:{'Content-Type':'application/json'}});
-    const result=await response.json();
-    energyMsg.textContent=result.message;
-  }catch(e){energyMsg.textContent='Le test ENERGY n’a pas pu être lancé.'}
-  finally{energyButton.disabled=false}
-});
-const readEnergy=document.getElementById('readEnergy'),readEnergyMsg=document.getElementById('readEnergyMsg');
-const energyDatapoints=document.getElementById('energyDatapoints');
-readEnergy.addEventListener('click',async()=>{
-  readEnergy.disabled=true;
-  readEnergyMsg.textContent='Lecture locale d’ENERGY en cours…';
-  energyDatapoints.hidden=true;
-  try{
-    const response=await fetch('/tuya/energy-datapoints',{method:'POST',headers:{'Content-Type':'application/json'}});
-    const result=await response.json();
-    readEnergyMsg.textContent=result.message;
-    if(response.ok && result.success){
-      energyDatapoints.textContent=JSON.stringify(result.datapoints,null,2);
-      energyDatapoints.hidden=false;
-    }
-  }catch(e){readEnergyMsg.textContent='Le diagnostic ENERGY n’a pas pu être lancé.'}
-  finally{readEnergy.disabled=false}
-});
-</script></body></html>'''
-
-
 
 # Diagnostic v0.3.2 : pas de secrets dans les journaux. Les messages internes
 # (ValueError/RuntimeError leves par ce module) sont des constantes du code.
@@ -263,16 +189,20 @@ def load_active_config():
     return None
 
 
-def save_active_config(config, activation=False):
+def save_active_config(config, activation=False, netbird_settings=None):
     """Sauvegarde tournante avant remplacement, restauration sur echec.
 
     L'archive manuelle n'est jamais lue ni modifiee par cette fonction.
     """
     validate_config(config, require_full_site=False)
-    if not SHARED_FILE.exists():
-        # 0.3.1 ne doit jamais creer un fichier HA incomplet.
-        raise RuntimeError('Fichier HA absent; activation reportee jusqu au modele complet')
-    shared = load_json(SHARED_FILE)
+    if activation and not SHARED_FILE.exists():
+        shared = {
+            'hub': {'site_id': config['site_id'], 'device_code': config['device_code']},
+            'niusmart': {'server_url': config['api_base_url']},
+            'netbird': {},
+        }
+    else:
+        shared = load_json(SHARED_FILE)
     if not isinstance(shared, dict) or not isinstance(shared.get('hub'), dict) or not isinstance(shared.get('niusmart'), dict):
         raise RuntimeError('Fichier HA invalide; aucune modification')
     if shared['hub'].get('site_id') != PILOT_SITE_ID or shared['hub'].get('site_id') != config['site_id']:
@@ -289,6 +219,9 @@ def save_active_config(config, activation=False):
         if is_nonblank(shared['hub'].get('hub_identifier')):
             raise RuntimeError('Identifiant deja present: reactivation interdite')
         shared['hub']['hub_identifier'] = config['hub_identifier']
+        if netbird_settings:
+            previous = shared.get('netbird')
+            shared['netbird'] = {**(previous if isinstance(previous, dict) else {}), **netbird_settings}
     elif not is_nonblank(shared['niusmart'].get('api_key')):
         raise RuntimeError('Cle existante absente')
     shared['niusmart']['api_key'] = config['api_key']
@@ -739,7 +672,11 @@ def sync_loop():
     while not STOP.wait(SYNC_INTERVAL):
         try:
             config = load_active_config()
-            if not validate_identity_for_sync(config):
+            if PENDING_FILE.exists():
+                with LOCK:
+                    if PENDING_FILE.exists():
+                        confirm_pending()
+            elif not validate_identity_for_sync(config):
                 recover_if_needed()
             else:
                 synchronize()
@@ -806,41 +743,135 @@ def update_tuya_inventory(feed, scan):
     })
     detected = sum(item['discovered'] for item in modules.values())
     diagnostic('tuya_inventory', result='ok', status=f'{detected}/{len(modules)}')
+    update_module_status(feed, modules, scan.get('scanned_at'))
     return modules, f'{detected} module(s) détecté(s) sur {len(modules)} attendu(s). {note}'.strip()
 
 
-def scan_tuya(manual=False):
+def update_module_status(feed, endpoints, scanned_at):
+    from hub_modules import publish_energy, snapshot_modules
+
+    global MODULE_STATUS
+    modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc))
+    config = load_active_config()
+    options = (config.get('site_config') or {}) if validate_identity_for_sync(config) else {}
+    monitoring = options.get('has_power_monitoring')
+    status = 'Option non reçue' if monitoring is None else 'Mesures MQTT désactivées'
+    if monitoring == 1:
+        try:
+            count = publish_energy(feed['hub_id'], modules, expire_after=TUYA_SCAN_INTERVAL * 3)
+            status = f'{count} mesure(s) publiée(s)' if count else 'En attente de mesures utilisables'
+        except Exception as exc:
+            diagnostic_error('energy_mqtt_error', exc)
+            status = 'Publication MQTT indisponible'
+    MODULE_STATUS = {'modules': modules, 'scanned_at': scanned_at, 'error': None, 'energy_mqtt': status}
+
+
+def scan_tuya():
     from tuya_discovery import discover_once
 
-    note = ''
-    try:
-        feed = fetch_tuya_inventory()
-    except Exception as exc:
-        if not manual:
-            raise
-        diagnostic_error('tuya_inventory_feed_error', exc)
-        feed = None
-        note = 'Inventaire NiuSmart indisponible. Seul le balayage habituel a pu être effectué.'
-    if feed is None and not manual:
+    feed = fetch_tuya_inventory()
+    if feed is None:
         return None
     discover_once(str(DATA_DIR))
     scan = load_json(DATA_DIR / 'tuya_discovery.json')
     if not isinstance(scan, dict) or not isinstance(scan.get('devices'), dict):
         raise RuntimeError('Resultat de balayage Tuya invalide')
-    if feed is None:
-        return scan, {}, note
     return (scan, *update_tuya_inventory(feed, scan))
 
 
 def tuya_discovery_loop():
+    global MODULE_STATUS
     while not STOP.is_set():
         try:
             with TUYA_SCAN_LOCK:
                 scan_tuya()
         except Exception as exc:
             diagnostic_error('tuya_discovery_error', exc)
+            MODULE_STATUS = {**MODULE_STATUS, 'error': 'Actualisation indisponible · dernières données affichées'}
         if STOP.wait(TUYA_SCAN_INTERVAL):
             break
+
+
+def netbird_enrollment(source):
+    if not isinstance(source, dict):
+        return {}
+    return {key: source[key].strip() for key in ('setup_key', 'management_url', 'admin_url')
+            if is_nonblank(source.get(key))}
+
+
+def netbird_loop():
+    from hub_netbird import provision_netbird
+
+    global NETBIRD_STATUS
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            if validate_identity_for_sync(config) and not PENDING_FILE.exists():
+                shared = load_json(SHARED_FILE) or {}
+                legacy = shared.get('netbird')
+                options = load_json(ADDON_OPTIONS) or {}
+                settings = netbird_enrollment(legacy)
+                if is_nonblank(options.get('netbird_setup_key')):
+                    settings['setup_key'] = options['netbird_setup_key']
+                if is_nonblank(options.get('netbird_repository')):
+                    settings['repository'] = options['netbird_repository'].strip()
+                elif isinstance(legacy, dict) and is_nonblank(legacy.get('repository')):
+                    settings['repository'] = legacy['repository'].strip()
+
+                def save_pending(slug):
+                    if slug is None:
+                        NETBIRD_PENDING_FILE.unlink(missing_ok=True)
+                    else:
+                        write_json_atomic(NETBIRD_PENDING_FILE, {'slug': slug})
+
+                pending = load_json(NETBIRD_PENDING_FILE) or {}
+                NETBIRD_STATUS = provision_netbird(
+                    settings, config['device_code'], pending.get('slug'), save_pending,
+                )
+        except Exception as exc:
+            NETBIRD_STATUS = 'Vérification ou installation indisponible'
+            diagnostic_error('netbird_error', exc)
+        if STOP.wait(TUYA_SCAN_INTERVAL):
+            break
+
+
+def is_activation_template(shared):
+    if not isinstance(shared, dict):
+        return False
+    hub, niusmart = shared.get('hub'), shared.get('niusmart')
+    return (
+        isinstance(hub, dict) and isinstance(niusmart, dict)
+        and hub.get('site_id') == PILOT_SITE_ID and is_nonblank(hub.get('device_code'))
+        and niusmart.get('server_url') == DEFAULT_BASE_URL
+        and not is_nonblank(niusmart.get('api_key'))
+        and not is_nonblank(hub.get('hub_identifier'))
+    )
+
+
+def dashboard_status():
+    config = load_active_config()
+    pending = PENDING_FILE.exists()
+    activated = validate_identity_for_sync(config) and not pending
+    status = {
+        'activated': activated,
+        'pending': pending,
+        'recovery_needed': not activated and not pending and (
+            (SHARED_FILE.exists() and not is_activation_template(load_json(SHARED_FILE)))
+            or CONFIG_FILE.exists() or BACKUP_FILE.exists() or ROTATION_FILE.exists()
+            or IDENTIFIER_FILE.exists()
+        ),
+    }
+    if activated:
+        site = config.get('site_config') or {}
+        status.update({
+            'hub': config['device_code'],
+            'options': {key: site[key] for key in (
+                SITE_FLAG_FIELDS | {'toilet_count', 'door_count', 'climate_count'}
+            ) if key in site},
+            'netbird': NETBIRD_STATUS,
+            **MODULE_STATUS,
+        })
+    return status
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -856,7 +887,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ('/', '/index.html'):
-            raw = HTML.encode('utf-8')
+            raw = DASHBOARD_FILE.read_bytes()
             content_type = 'text/html; charset=utf-8'
         elif self.path == '/logo.png' and LOGO_FILE.is_file():
             raw = LOGO_FILE.read_bytes()
@@ -865,12 +896,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = ICON_FILE.read_bytes()
             content_type = 'image/png'
         elif self.path == '/status':
-            config = load_active_config()
-            activated = validate_identity_for_sync(config) and not PENDING_FILE.exists()
-            return self.send_json(200, {
-                'activated': activated, 'pending': PENDING_FILE.exists(),
-                'recovery_needed': (SHARED_FILE.exists() or CONFIG_FILE.exists() or BACKUP_FILE.exists()) and not activated and not PENDING_FILE.exists(),
-            })
+            return self.send_json(200, dashboard_status())
         else:
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
         self.send_response(200)
@@ -881,69 +907,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def handle_energy_test(self, *, read_only=False):
-        if self.headers.get_content_type() != 'application/json':
-            return self.send_json(415, {'success': False, 'message': 'Requête JSON requise.'})
-        if not TUYA_SCAN_LOCK.acquire(blocking=False):
-            return self.send_json(409, {'success': False, 'message': 'Un test ou un balayage est déjà en cours.'})
-        try:
-            from energy_mqtt_test import EnergyTestError, read_energy_datapoints, test_energy
-
-            try:
-                feed = fetch_tuya_inventory()
-                inventory = load_json(TUYA_INVENTORY_FILE)
-                if read_only:
-                    _, datapoints = read_energy_datapoints(feed, inventory)
-                    return self.send_json(200, {
-                        'success': True,
-                        'message': f'ENERGY a renvoyé {len(datapoints)} datapoint(s).',
-                        'datapoints': datapoints,
-                    })
-                message = test_energy(feed, inventory)
-            except EnergyTestError as exc:
-                return self.send_json(409, {'success': False, 'message': str(exc)})
-            diagnostic('tuya_energy_mqtt_test', result='ok')
-            return self.send_json(200, {'success': True, 'message': message})
-        except Exception as exc:
-            diagnostic_error('tuya_energy_mqtt_test_error', exc)
-            return self.send_json(500, {
-                'success': False, 'message': 'Échec du test ENERGY. Consultez le journal de l’application.',
-            })
-        finally:
-            TUYA_SCAN_LOCK.release()
-
     def do_POST(self):
-        if self.path == '/tuya/energy-datapoints':
-            return self.handle_energy_test(read_only=True)
-        if self.path == '/tuya/energy-test':
-            return self.handle_energy_test()
-        if self.path == '/tuya/scan':
-            if not TUYA_SCAN_LOCK.acquire(blocking=False):
-                return self.send_json(409, {'success':False,'message':'Un balayage est déjà en cours.'})
-            try:
-                result, modules, message = scan_tuya(manual=True)
-                raw_devices = result.get('devices', {}) if isinstance(result, dict) else {}
-                devices = []
-                if isinstance(raw_devices, dict):
-                    for device_id, info in raw_devices.items():
-                        if not isinstance(device_id, str) or not isinstance(info, dict):
-                            continue
-                        ip = info.get('ip')
-                        if isinstance(ip, str) and ip:
-                            version = info.get('version')
-                            devices.append({'device_id':device_id,'ip':ip,'version':version if isinstance(version, str) else None})
-                devices.extend(
-                    {'device_id': device_id, 'ip': info['ip'], 'version': info['version'], 'last_known': True}
-                    for device_id, info in modules.items() if not info['discovered'] and info['ip']
-                )
-                devices.sort(key=lambda item: item['device_id'])
-                diagnostic('tuya_discovery_manual', result='ok', status='devices_found' if devices else 'none')
-                return self.send_json(200, {'success':True,'scanned_at':result.get('scanned_at'),'count':len(raw_devices),'devices':devices,'message':message})
-            except Exception as exc:
-                diagnostic_error('tuya_discovery_manual_error', exc)
-                return self.send_json(500, {'success':False,'message':'Balayage impossible. Consultez le journal de l’application.'})
-            finally:
-                TUYA_SCAN_LOCK.release()
         if self.path != '/activate':
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
         try:
@@ -964,14 +928,11 @@ class Handler(BaseHTTPRequestHandler):
                 # Refus aussi si fichier corrompu : ne jamais en autoriser l'ecrasement.
                 if CONFIG_FILE.exists() or BACKUP_FILE.exists() or ROTATION_FILE.exists() or existing_identifier() is not None:
                     return self.send_json(409, {'success':False,'message':'Hub deja configure ou en recuperation; intervention manuelle requise.'})
-                template = load_json(SHARED_FILE)
-                required = {'hub', 'niusmart', 'home_assistant', 'netbird', 'localtuya', 'tuya_developer', 'ssh'}
-                if (not isinstance(template, dict) or not required.issubset(template)
-                        or not isinstance(template.get('hub'), dict) or not isinstance(template.get('niusmart'), dict)
-                        or template['hub'].get('site_id') != PILOT_SITE_ID
-                        or is_nonblank(template['niusmart'].get('api_key'))
-                        or is_nonblank(template['hub'].get('hub_identifier'))):
-                    return self.send_json(409, {'success':False,'message':'Modele HA absent, incomplet ou Hub deja active.'})
+                if SHARED_FILE.exists() and not is_activation_template(load_json(SHARED_FILE)):
+                    return self.send_json(409, {'success':False,'message':'Configuration HA incomplète ou hub déjà activé.'})
+                config_dir = SHARED_FILE.parent if SHARED_FILE.parent.is_dir() else SHARED_FILE.parent.parent
+                if not config_dir.is_dir() or not os.access(config_dir, os.W_OK):
+                    return self.send_json(503, {'success':False,'message':'Dossier de configuration Home Assistant inaccessible.'})
                 result = api({'action':'activate','code':code})
                 aid = result.get('activation_id')
                 config = {
@@ -987,7 +948,7 @@ class Handler(BaseHTTPRequestHandler):
                 validate_config(config)  # TOUS les champs AVANT ecriture.
                 if existing_identifier() is not None:
                     raise RuntimeError('Identifiant deja attribue; activation interdite')
-                save_active_config(config, activation=True)
+                save_active_config(config, activation=True, netbird_settings=netbird_enrollment(result.get('netbird')))
                 write_json_atomic(PENDING_FILE, {'activation_id':aid})
                 try:
                     confirm_pending()
@@ -1020,6 +981,7 @@ if __name__ == '__main__':
         except Exception as exc:
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
+    Thread(target=netbird_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
     print(f'Niu Hub activation listening on {BIND}:{PORT}', flush=True)

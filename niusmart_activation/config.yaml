@@ -1,11 +1,14 @@
 name: "Niu Hub Activation"
-version: "0.3.10"
+version: "0.3.11"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
 startup: application
 boot: auto
 init: false
+webui: "http://[HOST]:[PORT:8099]/"
+hassio_api: true
+hassio_role: manager
 # Acces aux broadcasts LAN Tuya (UDP 6666/6667/7000).
 host_network: true
 arch:
@@ -17,7 +20,9 @@ ports:
 ports_description:
   8099/tcp: "Interface d'activation Niu Hub (reseau local uniquement)"
 options: {}
-schema: {}
+schema:
+  netbird_setup_key: password?
+  netbird_repository: url?
 services:
   - mqtt:want
 
