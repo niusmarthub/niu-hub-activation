@@ -1,4 +1,4 @@
-"""Read local Tuya datapoints and publish their states to MQTT."""
+"""Read and control local Tuya datapoints through MQTT."""
 
 import json
 import re
@@ -8,7 +8,7 @@ from time import monotonic
 
 import tinytuya
 
-from hub_mqtt import mqtt_service, publish_samples
+from hub_mqtt import mqtt_service, publish_samples, relay_hub_availability
 
 
 # PJ1103B (product ID bbcg1hrkrj5rifsd). The scale applies to the local DP value.
@@ -62,8 +62,9 @@ ENERGY_CODES = {
     "frequency": {"freq", "frequency", "ac_frequency", "frequency_live"},
 }
 DP_ID = re.compile(r"[1-9][0-9]{0,4}")
-RELAY_CODE = re.compile(r"(?:switch|relay)(?:_[1-9][0-9]*)?")
+RELAY_CODE = re.compile(r"(?:switch|relay)(?:_[0-9]+)?")
 TOPIC_ID = re.compile(r"[a-zA-Z0-9_-]+")
+RELAY_COMMAND_MAX_AGE = 15
 
 
 def local_device(module, endpoint):
@@ -152,7 +153,7 @@ def public_datapoints(module, values):
             label, unit, divisor, device_class = measure
             if divisor != 1 and (type(raw) is int or type(raw) is float and isfinite(raw)):
                 value = raw / divisor
-        relay = bool(RELAY_CODE.fullmatch(code)) and (raw is None or type(raw) is bool)
+        relay = not measure and bool(RELAY_CODE.fullmatch(code))
         if device_class == "energy":
             state_class = item.get("state_class") if declared else "total_increasing"
             if state_class not in ("total", "total_increasing"):
@@ -161,7 +162,8 @@ def public_datapoints(module, values):
             state_class = "measurement"
         rows.append({
             "id": dp_id, "name": label, "value": value, "raw": raw, "unit": unit,
-            "relay_candidate": relay, "device_class": device_class, "energy_measurement": eligible,
+            "relay_candidate": relay, "relay_channel": int(code.rsplit("_", 1)[-1])
+            if relay and "_" in code else 1 if relay else None, "device_class": device_class, "energy_measurement": eligible,
             "state_class": state_class,
         })
     return rows
@@ -190,25 +192,91 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
     return list(read(snapshot, feed["modules"]))
 
 
-def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent=None, refresh_after=30):
+def apply_relay_commands(feed, endpoints, modules, commands, executor, is_current, on_error):
+    if not commands:
+        return
+    pending = {}
+    for device_id, dp_id, desired, received in commands:
+        pending.setdefault(device_id, {})[dp_id] = (desired, received)
+    inventory = {module["tuya_device_id"]: module for module in feed["modules"]}
+
+    def apply(module):
+        device_id = module["id"]
+        requested = pending.get(device_id)
+        if not requested or not module["seen"] or not module["read"]:
+            return
+        for dp in module["datapoints"]:
+            request = requested.get(dp["id"])
+            if not request or not dp["relay_candidate"] or type(dp["raw"]) is not bool:
+                continue
+            desired, received = request
+            if monotonic() - received > RELAY_COMMAND_MAX_AGE or not is_current():
+                continue
+            try:
+                confirmed = set_confirmed_relay(inventory[device_id], endpoints[device_id], dp["id"], desired)
+                dp["raw"] = dp["value"] = confirmed
+            except Exception as exc:
+                on_error(exc)
+
+    list(executor.map(apply, (module for module in modules if module["id"] in pending)))
+
+
+def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent=None, refresh_after=30,
+                          tracked_switches=None, save_switches=None):
     if not TOPIC_ID.fullmatch(hub_id):
         raise ValueError("Identifiant de sujet MQTT invalide")
     messages = []
     counts = {'energy': 0, 'other': 0}
-    retired_test_topics = set()
+    retired_topics = set()
+    tracked_switches = tracked_switches if tracked_switches is not None else set()
+    active_switches = set()
+    published_datapoints = []
+    relay_number = 0
     for module in modules:
         device_id = module["id"]
         if not TOPIC_ID.fullmatch(device_id):
             continue
         if module["product_id"] == ENERGY_PRODUCT:
             # The old diagnostic used a different entity ID and retained its raw state.
-            retired_test_topics.update((
+            retired_topics.update((
                 f"homeassistant/sensor/niusmart_{device_id}_test_dp101/config",
                 f"niusmart/{hub_id}/tuya/energy/test/101/state",
             ))
+        relay_names = {}
+        relay_channels = sorted(
+            (dp for dp in module["datapoints"] if dp["relay_candidate"]),
+            key=lambda dp: (dp.get("relay_channel") or int(dp["id"]), int(dp["id"])),
+        )
+        for dp in relay_channels:
+            relay_number += 1
+            relay_names[dp["id"]] = f"Switch {relay_number}"
         for dp in module["datapoints"]:
             energy_measurement = dp["energy_measurement"]
             value = dp["value"]
+            dp_id = dp["id"]
+            unique_id = f"niusmart_{device_id}_dp{dp_id}"
+            topic_base = f"niusmart/{hub_id}/tuya/{device_id}/{dp_id}"
+            state_topic = f"{topic_base}/state"
+            device = {"identifiers": [f"niusmart_tuya_{device_id}"], "name": module["name"]}
+            if dp["relay_candidate"] and (module["seen"] or (device_id, dp_id) in tracked_switches):
+                active_switches.add((device_id, dp_id))
+                config = {
+                    "name": relay_names[dp_id], "unique_id": unique_id, "state_topic": state_topic,
+                    "command_topic": f"{topic_base}/set", "device": device, "qos": 1,
+                    "payload_on": "on", "payload_off": "off", "retain": False, "optimistic": False,
+                    "availability_mode": "all",
+                    "availability": [{"topic": relay_hub_availability(hub_id)},
+                                     {"topic": f"{topic_base}/availability"}],
+                }
+                retired_topics.add(f"homeassistant/sensor/{unique_id}/config")
+                messages.append((f"homeassistant/switch/{unique_id}/config", json.dumps(config), True))
+                published_datapoints.append((dp, config["name"], "switch"))
+                online = module["read"] and type(value) is bool
+                if online:
+                    messages.append((state_topic, "on" if value else "off", False))
+                    counts["other"] += 1
+                messages.append((f"{topic_base}/availability", "online" if online else "offline", True))
+                continue
             if energy_measurement:
                 if not energy_enabled:
                     continue
@@ -230,11 +298,9 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
             if isinstance(value, str) and (not value.strip() or len(value) > 255):
                 continue
             device_class = dp["device_class"]
-            unique_id = f"niusmart_{device_id}_dp{dp['id']}"
-            state_topic = f"niusmart/{hub_id}/tuya/{device_id}/{dp['id']}/state"
             config = {
                 "name": dp["name"], "unique_id": unique_id, "state_topic": state_topic,
-                "device": {"identifiers": [f"niusmart_tuya_{device_id}"], "name": module["name"]},
+                "device": device,
                 "expire_after": expire_after,
             }
             if dp["unit"]:
@@ -254,7 +320,18 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
                 (f"homeassistant/sensor/{unique_id}/config", json.dumps(config), True),
                 (state_topic, payload, False),
             ))
-    messages[:0] = [(topic, "", True) for topic in sorted(retired_test_topics)]
+            published_datapoints.append((dp, config["name"], "sensor"))
+    for device_id, dp_id in tracked_switches - active_switches:
+        retired_topics.update((
+            f"homeassistant/switch/niusmart_{device_id}_dp{dp_id}/config",
+            f"niusmart/{hub_id}/tuya/{device_id}/{dp_id}/availability",
+        ))
+    messages[:0] = [(topic, "", True) for topic in sorted(retired_topics)]
+    if active_switches - tracked_switches:
+        # Record potential retained configs before sending them, including partial sends.
+        if save_switches is not None:
+            save_switches(tracked_switches | active_switches)
+        tracked_switches.update(active_switches)
     if sent is None:
         sent = {}
     now = monotonic()
@@ -264,12 +341,18 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
         previous = sent.get(topic)
         if previous is None or previous[0] != payload:
             outgoing.append(message)
-        elif topic not in retired_test_topics and now - previous[1] >= refresh_after:
+        elif topic not in retired_topics and now - previous[1] >= refresh_after:
             outgoing.append(message)
     if outgoing:
         publish_samples(mqtt_service(), outgoing)
         sent.update({topic: (payload, now) for topic, payload, _ in outgoing})
+    if tracked_switches - active_switches:
+        if save_switches is not None:
+            save_switches(active_switches)
+        tracked_switches.intersection_update(active_switches)
     active_topics = {topic for topic, _, _ in messages}
     for topic in sent.keys() - active_topics:
         del sent[topic]
+    for dp, name, mode in published_datapoints:
+        dp.update(mqtt_name=name, mqtt_mode=mode)
     return counts

@@ -9,7 +9,7 @@
     :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #eaf2f8; background: #081726; }
     * { box-sizing: border-box; }
     body { margin: 0; }
-    main { max-width: 960px; padding: 28px 18px; margin: auto; }
+    main { max-width: 1120px; padding: 28px 18px; margin: auto; }
     header { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
     header img { width: 150px; height: auto; }
     h1, h2, h3, p { margin: 0; }
@@ -19,7 +19,6 @@
     .panel { background: #10263b; border: 1px solid #294963; border-radius: 14px; padding: 18px; margin-bottom: 14px; }
     .layout { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
     .panel > * + * { margin-top: 12px; }
-    .line[hidden] { display: none; }
     .line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
     form { max-width: 390px; }
     label { display: block; margin-bottom: 8px; }
@@ -34,13 +33,25 @@
     details { border: 1px solid #294963; border-radius: 9px; padding: 12px; }
     details + details { margin-top: 10px; }
     summary { cursor: pointer; font-weight: 650; }
-    summary small { font-weight: 400; }
+    summary > * { display: inline-block; margin: 2px 0 2px 7px; vertical-align: middle; }
+    summary > a { margin-left: 0; color: inherit; }
+    a { color: #8edbff; text-underline-offset: .18em; }
+    .module-ip, .raw-value { font-family: ui-monospace, monospace; font-size: .875rem; }
+    .module-ip, .raw-value { color: #bed0df; }
+    .module-description { display: block; margin-top: 7px; }
+    .badge { display: inline-block; border-radius: 5px; padding: 2px 6px; font-size: .775rem; font-weight: 650; }
+    .badge.ready { color: #b2f2ca; background: #164437; }
+    .badge.warning { color: #ffde9b; background: #503915; }
+    .badge.offline { color: #ffc2ca; background: #542733; }
+    .badge.switch { color: #b6e6ff; background: #193e60; }
+    .badge.sensor { color: #d5e1ec; background: #344659; }
+    .badge.unpublished { color: #a4b6c7; background: #24384b; }
     .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 10px; }
+    table { width: 100%; min-width: 640px; border-collapse: collapse; text-align: left; margin-top: 10px; }
     th, td { padding: 7px 8px; border-bottom: 1px solid #294963; overflow-wrap: anywhere; }
     th { font-size: .875rem; color: #bed0df; }
     td:first-child { white-space: nowrap; width: 4rem; }
-    td:last-child { max-width: 290px; }
+    tr:target { background: #193e60; }
     .muted { font-size: .895rem; }
   </style>
 </head>
@@ -71,13 +82,31 @@
         <section class="panel" aria-labelledby="servicesTitle">
           <h2 id="servicesTitle">Services</h2>
           <dl>
+            <div class="line"><dt>Courtier MQTT</dt><dd id="mqttBroker"></dd></div>
             <div class="line"><dt>NetBird</dt><dd id="netbird"></dd></div>
             <div class="line"><dt>États des modules Tuya dans MQTT</dt><dd id="tuya-mqtt"></dd></div>
-            <div class="line" id="solar-line" hidden><dt>Solaire ECO-WORTHY</dt><dd id="solar"></dd></div>
             <div class="line"><dt>Mesures d’énergie MQTT</dt><dd id="mqtt"></dd></div>
           </dl>
         </section>
       </div>
+      <section class="panel" id="solarPanel" aria-labelledby="solarTitle" hidden>
+        <h2 id="solarTitle">Solaire ECO-WORTHY</h2>
+        <div id="solarMetrics"></div>
+        <details>
+          <summary>Registres Modbus</summary>
+          <p id="solarDiagnosticStatus" role="status"></p>
+          <div class="table-wrap" id="solarRegisterTable" hidden>
+            <table>
+              <thead><tr><th>N°</th><th>Trame</th><th>Adresse</th><th>Décimal</th><th>Hexadécimal</th><th>Repère</th></tr></thead>
+              <tbody id="solarRegisters"></tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+      <section class="panel" id="climatePanel" aria-labelledby="climateTitle" hidden>
+        <h2 id="climateTitle">Climatisation Niu CAN</h2>
+        <p id="climateStatus" role="status"></p>
+      </section>
       <section class="panel" aria-labelledby="modulesTitle">
         <div class="line">
           <h2 id="modulesTitle">Modules NiuSmart</h2>
@@ -109,11 +138,35 @@
       has_solar_panels: 'Panneaux solaires',
     };
     let inventoryVersion;
+    let initialLinkShown = !location.hash;
 
     function element(tag, value) {
       const item = document.createElement(tag);
       if (value != null) item.textContent = value;
       return item;
+    }
+
+    function badge(value, tone) {
+      const item = element('span', value);
+      item.className = 'badge ' + tone;
+      return item;
+    }
+
+    function linkTo(id, value) {
+      const link = element('a', value);
+      link.href = '#' + encodeURIComponent(id);
+      return link;
+    }
+
+    function showLinkedRow(scroll) {
+      let id;
+      try { id = decodeURIComponent(location.hash.slice(1)); } catch { return false; }
+      const target = node(id);
+      if (!target || !node('modules').contains(target)) return false;
+      const module = target.closest('details');
+      if (module) module.open = true;
+      if (scroll) target.scrollIntoView({block: 'nearest'});
+      return true;
     }
 
     function renderModules(modules) {
@@ -122,14 +175,26 @@
       container.replaceChildren();
       for (const module of modules) {
         const entry = element('details');
+        entry.id = 'module-' + module.id;
         entry.dataset.id = module.id;
         entry.open = expanded.has(module.id);
-        const heading = element('summary', module.name + ' · ');
-        heading.append(element('small', module.read ? 'Lecture disponible' :
-          module.seen ? 'Détecté · lecture indisponible' : 'Non détecté'));
+        const heading = element('summary');
+        const ip = element('span', module.ip ? (module.seen ? 'IP ' : 'Dernière IP ') + module.ip : 'IP inconnue');
+        ip.className = 'module-ip';
+        const hasSwitch = module.datapoints.some(dp => dp.mqtt_mode === 'switch');
+        const hasSensor = module.datapoints.some(dp => dp.mqtt_mode === 'sensor');
+        heading.append(linkTo(entry.id, module.name), ip, badge(
+          module.read ? 'Lecture disponible' : module.seen ? 'Lecture indisponible' : 'Non détecté',
+          module.read ? 'ready' : module.seen ? 'warning' : 'offline'));
+        if (hasSwitch) heading.append(badge('Commande MQTT', 'switch'));
+        else if (hasSensor) heading.append(badge('Lecture seule', 'sensor'));
         entry.append(heading);
-        const description = [module.product, module.product_id, module.ip, module.protocol].filter(Boolean).join(' · ');
-        if (description) entry.append(element('small', description));
+        const description = [module.product, module.product_id, module.protocol].filter(Boolean).join(' · ');
+        if (description) {
+          const metadata = element('small', description);
+          metadata.className = 'module-description';
+          entry.append(metadata);
+        }
         if (!module.datapoints.length) {
           entry.append(element('p', 'Aucun datapoint disponible.'));
         } else {
@@ -137,25 +202,43 @@
           wrapper.className = 'table-wrap';
           const table = element('table');
           const labels = table.createTHead().insertRow();
-          for (const label of ['DP', 'Nom', 'Valeur', 'Valeur brute']) labels.append(element('th', label));
+          for (const label of ['DP', 'Nom', 'Valeur', 'Valeur brute', 'Nom envoyé à MQTT', 'Mode']) {
+            const header = element('th', label);
+            header.scope = 'col';
+            labels.append(header);
+          }
           const body = table.createTBody();
           for (const dp of module.datapoints) {
             const row = body.insertRow();
+            row.id = entry.id + '-dp-' + dp.id;
             const value = dp.value == null ? '—' : typeof dp.value === 'object' ?
               JSON.stringify(dp.value) : String(dp.value);
             const raw = dp.raw == null ? '—' : typeof dp.raw === 'object' ?
               JSON.stringify(dp.raw) : String(dp.raw);
-            const label = dp.name + (dp.relay_candidate ? ' · relais à valider' : '');
-            for (const cell of [dp.id, label, value + (dp.unit && dp.value != null ? ' ' + dp.unit : ''), raw]) {
-              row.append(element('td', cell));
+            const id = element('td');
+            id.append(linkTo(row.id, dp.id));
+            const valueCell = element('td');
+            if (typeof dp.value === 'boolean') {
+              valueCell.append(badge(dp.value ? 'Actif' : 'Inactif', dp.value ? 'ready' : 'sensor'));
+            } else {
+              valueCell.textContent = value + (dp.unit && dp.value != null ? ' ' + dp.unit : '');
             }
+            const rawCell = element('td', raw);
+            rawCell.className = 'raw-value';
+            const mode = element('td');
+            mode.append(dp.mqtt_mode === 'switch' ? badge('Interrupteur MQTT', 'switch') :
+              dp.mqtt_mode === 'sensor' ? badge('Lecture seule', 'sensor') : badge('Non publié', 'unpublished'));
+            row.append(id, element('td', dp.name), valueCell, rawCell, element('td', dp.mqtt_name ?? '—'), mode);
           }
           wrapper.append(table);
           entry.append(wrapper);
         }
         container.append(entry);
       }
+      if (!initialLinkShown) initialLinkShown = showLinkedRow(true);
     }
+
+    window.addEventListener('hashchange', () => showLinkedRow(true));
 
     async function refreshStatus() {
       const response = await fetch('/status', {cache: 'no-store'});
@@ -179,8 +262,56 @@
       node('netbird').textContent = data.netbird;
       node('tuya-mqtt').textContent = data.tuya_mqtt;
       node('mqtt').textContent = data.energy_mqtt;
-      node('solar-line').hidden = !data.options.has_solar_panels;
-      node('solar').textContent = data.solar;
+      const brokers = {
+        ready: 'Disponible', starting: 'Démarrage de Mosquitto',
+        existing_configuration: 'Configuration MQTT existante à vérifier',
+        error: 'Provisionnement MQTT indisponible',
+      };
+      node('mqttBroker').textContent = brokers[data.mqtt_broker] || 'En attente';
+      node('climatePanel').hidden = !data.options.climate_count;
+      const climate = data.climate || {};
+      node('climateStatus').textContent = climate.installation === 'configured' ?
+        (climate.mqtt_entities == null ? 'Publication MQTT en attente' :
+          climate.mqtt_entities ? `${climate.mqtt_entities} entités MQTT` : 'En attente d’états Niu CAN') :
+        climate.installation === 'waiting_core' ? 'Intégration Niu CAN prête. Redémarrage de Home Assistant requis.' :
+        climate.installation === 'error' ? 'Installation Niu CAN indisponible. Consultez le journal.' : 'En attente';
+      const diagnostic = data.solar_diagnostics || {};
+      const registers = diagnostic.registres || [];
+      const diagnostics = {
+        direct_wait: 'En attente de la lecture Bluetooth par Niu Hub.',
+        installed: 'En attente des deux trames. Redémarrez Home Assistant si le diagnostic vient d’être installé.',
+        different_version: 'Le fichier ECO-WORTHY présent diffère de la version du pilote.',
+        backup_conflict: 'La sauvegarde ECO-WORTHY existante doit être vérifiée.',
+        configuration_required: 'La déclaration du capteur ECO-WORTHY doit être vérifiée.',
+        error: 'Installation du diagnostic indisponible. Consultez le journal.',
+      };
+      node('solarDiagnosticStatus').textContent = registers.length ? 'Dernière lecture valide' :
+        diagnostics[diagnostic.installation] || 'En attente du diagnostic ECO-WORTHY';
+      node('solarRegisterTable').hidden = !registers.length;
+      node('solarRegisters').replaceChildren(...registers.map(r => {
+        const row = element('tr');
+        row.append(...[String(r.numero).padStart(2, '0'), r.bloc, r.adresse,
+          r.decimale, r.hexadecimale, r.repere].map(value => element('td', String(value))));
+        return row;
+      }));
+      node('solarPanel').hidden = !data.options.has_solar_panels;
+      const metrics = node('solarMetrics');
+      metrics.replaceChildren();
+      const groups = new Map();
+      for (const metric of Object.values(data.solar || {})) {
+        if (!groups.has(metric.group)) {
+          const list = element('dl');
+          metrics.append(element('h3', metric.group), list);
+          groups.set(metric.group, list);
+        }
+        const row = element('div');
+        row.className = 'line';
+        row.append(element('dt', metric.name), element('dd',
+          metric.value == null ? 'Non disponible' : [metric.value, metric.unit, metric.estimated ? '(calculée)' : ''].filter(Boolean).join(' ')));
+        groups.get(metric.group).append(row);
+      }
+      if (!groups.size) metrics.append(element('p', 'Mesures Home Assistant indisponibles.'));
+
       node('moduleCount').textContent = data.scanned_at ?
         `${data.modules.filter(module => module.seen).length} détecté(s) / ${data.modules.length} reçu(s)` : '';
       node('inventoryStatus').textContent = data.error || (data.scanned_at ?

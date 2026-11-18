@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.3.14"
+version: "0.3.16"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
@@ -8,6 +8,7 @@ boot: auto
 init: false
 webui: "http://[HOST]:[PORT:8099]/"
 hassio_api: true
+homeassistant_api: true
 hassio_role: manager
 # Acces aux broadcasts LAN Tuya (UDP 6666/6667/7000).
 host_network: true

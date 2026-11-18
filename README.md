@@ -11,6 +11,15 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
+## 0.3.16 — options et diagnostic REM-0021
+
+- Installez ou mettez à jour Niu Hub Activation. L’application réutilise le service MQTT fourni par le Supervisor et peut demander l’installation de Mosquitto si aucun service ni aucune configuration MQTT existante n’est détecté.
+- L’option solaire NiuSmart active le lecteur Bluetooth intégré lorsqu’aucune intégration ECO-WORTHY n’est installée. Sur REM-0021, lorsqu’une intégration est déjà en place, Niu Hub reprend ses mesures et sauvegarde automatiquement le fichier d’origine reconnu avant d’ajouter le diagnostic. Cette modification prend effet au prochain redémarrage de Home Assistant. Un fichier personnalisé différent reste en place.
+- Sous **Solaire ECO-WORTHY → Registres Modbus**, le tableau reçoit les 30 valeurs brutes de la dernière lecture valide. Les numéros 01–15 correspondent à L01 et 16–30 à L02. Il n’est pas nécessaire de créer une carte Home Assistant.
+- Le nombre de climatiseurs NiuSmart prépare Niu CAN et définit les zones exportées en MQTT. Niu Hub tente de créer l’entrée Niu CAN dès que Home Assistant la reconnaît. Les commandes Dometic passent par les thermostats Niu CAN de Home Assistant.
+- La désactivation retire les annonces MQTT créées par Niu Hub pour l’option. Une réduction de deux climatiseurs à un retire R2. La réactivation republie les entités correspondantes. Les états de ces sections sont publiés sans rétention.
+- Ce paquet est prévu pour le pilote REM-0021. Le provisionnement du Supervisor, le redémarrage et les lectures matérielles restent à confirmer sur le hub.
+
 ## 0.3.14 — pilote solaire ECO-WORTHY
 
 - L’option de site **Panneaux solaires** lance la lecture Bluetooth sur un Hub activé. L’application détecte un adaptateur MPPT-BT02. Si plusieurs sont présents, renseigner son adresse dans l’option `solar_bluetooth_address` de l’application.

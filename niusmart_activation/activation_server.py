@@ -90,6 +90,8 @@ MQTT_STATE_REFRESH = 30
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
+TUYA_SWITCHES_FILE = DATA_DIR / 'tuya_mqtt_switches.json'
+TUYA_MODULE_ORDER_FILE = DATA_DIR / 'tuya_module_order.json'
 TUYA_ACTIVE_ATTEMPT_FILE = DATA_DIR / 'tuya_active_attempt.json'
 TUYA_ACTIVE_INTERVAL = 3600
 DEFAULT_BASE_URL = 'https://niusmart.com'
@@ -108,7 +110,11 @@ DISCOVERY_STATUS = 'En attente'
 TUYA_TARGETS = None
 MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None, 'energy_mqtt': 'En attente de l’inventaire',
                  'tuya_mqtt': 'En attente de l’inventaire'}
+SOLAR_STATUS = {}
+SOLAR_DIAGNOSTICS = {"installation": "pending", "registres": []}
 NETBIRD_STATUS = 'Vérification en attente'
+MQTT_BROKER_STATUS = 'pending'
+CLIMATE_STATUS = {'installation': 'pending', 'mqtt_entities': None}
 CODE_PATTERN = re.compile(r'^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$')
 IDENTIFIER_PATTERN = re.compile(r'^niu-[a-f0-9]{32}$')
 
@@ -760,8 +766,8 @@ def update_tuya_inventory(feed, scan):
     return modules, f'{detected} module(s) détecté(s) sur {len(modules)} attendu(s). {note}'.strip()
 
 
-def update_module_status(feed, endpoints, scanned_at, executor, sent):
-    from hub_modules import publish_module_states, snapshot_modules
+def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, tracked_switches):
+    from hub_modules import apply_relay_commands, publish_module_states, snapshot_modules
 
     global MODULE_STATUS
     config = load_active_config()
@@ -773,16 +779,37 @@ def update_module_status(feed, endpoints, scanned_at, executor, sent):
                                executor=executor)
     if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
         return
-    MODULE_STATUS = {**MODULE_STATUS, 'modules': modules, 'scanned_at': scanned_at,
-                     'read_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'error': None}
+    if listener:
+        apply_relay_commands(
+            feed, endpoints, modules, listener.drain(), executor,
+            lambda: TUYA_TARGETS is not None and TUYA_TARGETS[0] is feed and not PENDING_FILE.exists(),
+            lambda exc: diagnostic_error('tuya_relay_command_error', exc),
+        )
+    if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
+        return
+    stored = load_json(TUYA_MODULE_ORDER_FILE) or {}
+    order = stored.get('modules', []) if isinstance(stored, dict) and stored.get('hub_id') == feed['hub_id'] else []
+    if not isinstance(order, list):
+        order = []
+    current = {module['id']: module for module in modules}
+    ordered_ids = list(dict.fromkeys(device_id for device_id in order if isinstance(device_id, str) and device_id in current))
+    ordered_ids.extend(device_id for device_id in current if device_id not in ordered_ids)
+    if ordered_ids != order:
+        write_json_atomic(TUYA_MODULE_ORDER_FILE, {'hub_id': feed['hub_id'], 'modules': ordered_ids})
+    modules = [current[device_id] for device_id in ordered_ids]
     options = config.get('site_config') or {}
     monitoring = options.get('has_power_monitoring')
     energy_status = 'Option non reçue' if monitoring is None else 'Mesures MQTT désactivées'
     module_status = 'En attente d’états utilisables'
+
+    def save_switches(switches):
+        write_json_atomic(TUYA_SWITCHES_FILE, {'hub_id': feed['hub_id'], 'switches': sorted(switches)})
+
     try:
         counts = publish_module_states(
             feed['hub_id'], modules, expire_after=MQTT_STATE_REFRESH * 3,
             energy_enabled=monitoring == 1, sent=sent, refresh_after=MQTT_STATE_REFRESH,
+            tracked_switches=tracked_switches, save_switches=save_switches,
         )
         if counts['other']:
             module_status = f"{counts['other']} état(s) publié(s)"
@@ -794,7 +821,10 @@ def update_module_status(feed, endpoints, scanned_at, executor, sent):
         module_status = 'Publication MQTT indisponible'
         if monitoring == 1:
             energy_status = module_status
-    MODULE_STATUS = {**MODULE_STATUS, 'energy_mqtt': energy_status, 'tuya_mqtt': module_status}
+    if TUYA_TARGETS is not None and TUYA_TARGETS[0] is feed:
+        MODULE_STATUS = {**MODULE_STATUS, 'modules': modules, 'scanned_at': scanned_at,
+                         'read_at': datetime.now(timezone.utc).isoformat(timespec='seconds'), 'error': None,
+                         'energy_mqtt': energy_status, 'tuya_mqtt': module_status}
 
 
 def scan_tuya():
@@ -868,57 +898,160 @@ def tuya_discovery_loop():
 
 
 def tuya_state_loop():
+    from hub_modules import DP_ID, TOPIC_ID
+    from hub_mqtt import RelayCommandListener, mqtt_service
+
     sent = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        while not STOP.is_set():
-            started = time.monotonic()
-            targets = TUYA_TARGETS
-            if targets:
-                try:
-                    update_module_status(*targets, executor, sent)
-                except Exception as exc:
-                    diagnostic_error('tuya_state_error', exc)
-            STOP.wait(max(0.1, TUYA_READ_INTERVAL - (time.monotonic() - started)))
+    tracked_switches = set()
+    hub_id = listener = None
+    next_mqtt_attempt = 0
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            while not STOP.is_set():
+                started = time.monotonic()
+                targets = TUYA_TARGETS
+                target_hub = targets[0]['hub_id'] if targets else None
+                if target_hub != hub_id:
+                    if listener:
+                        listener.close()
+                        listener = None
+                    hub_id = target_hub
+                    next_mqtt_attempt = 0
+                    sent.clear()
+                    saved = load_json(TUYA_SWITCHES_FILE) or {}
+                    tracked_switches = {
+                        (item[0], item[1]) for item in saved.get('switches', [])
+                        if isinstance(item, list) and len(item) == 2
+                        and all(isinstance(value, str) for value in item)
+                        and TOPIC_ID.fullmatch(item[0]) and DP_ID.fullmatch(item[1])
+                    } if isinstance(saved, dict) and saved.get('hub_id') == hub_id else set()
+                if targets:
+                    if listener is None and started >= next_mqtt_attempt and TOPIC_ID.fullmatch(hub_id):
+                        next_mqtt_attempt = started + 30
+                        try:
+                            listener = RelayCommandListener(mqtt_service(), hub_id)
+                        except Exception as exc:
+                            diagnostic_error('tuya_mqtt_command_listener_error', exc)
+                    try:
+                        update_module_status(*targets, executor, sent, listener, tracked_switches)
+                    except Exception as exc:
+                        diagnostic_error('tuya_state_error', exc)
+                STOP.wait(max(0.1, TUYA_READ_INTERVAL - (time.monotonic() - started)))
+    finally:
+        if listener:
+            listener.close()
 
 
-SOLAR_STATUS = 'En attente de la configuration du site'
+def mqtt_dependency_loop():
+    from hub_mqtt import provision_mqtt
 
-
-def solar_enabled(config):
-    return (validate_identity_for_sync(config) and not PENDING_FILE.exists()
-            and (config.get('site_config') or {}).get('has_solar_panels') == 1)
-
-
-async def solar_loop():
-    from hub_solar import publish_solar, read_solar
-
-    global SOLAR_STATUS
-    legacy = SHARED_FILE.parent.parent / 'custom_components' / 'eco_worthy'
+    global MQTT_BROKER_STATUS
+    root = SHARED_FILE.parent.parent
     while not STOP.is_set():
-        try:
-            config = load_active_config()
-            if not solar_enabled(config):
-                SOLAR_STATUS = 'Désactivé'
-            elif legacy.exists():
-                SOLAR_STATUS = 'Intégration Home Assistant existante · lecteur de l’application en pause'
-            else:
-                options = load_json(ADDON_OPTIONS) or {}
-                address = (options.get('solar_bluetooth_address') or '').strip()
+        config = load_active_config()
+        if validate_identity_for_sync(config) and not PENDING_FILE.exists():
+            try:
+                MQTT_BROKER_STATUS = provision_mqtt(root)
+            except Exception as exc:
+                MQTT_BROKER_STATUS = 'error'
+                diagnostic_error('mqtt_dependency_error', exc)
+        STOP.wait(60)
+
+
+def homeassistant_features_loop():
+    from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
+    from hub_solar import direct_snapshot, read_solar
+    from hub_homeassistant import (configure_climate, configure_inputs, core_api, install_climate,
+                                  publish_climate, publish_solar)
+
+    global SOLAR_STATUS, SOLAR_DIAGNOSTICS, CLIMATE_STATUS
+    root = SHARED_FILE.parent.parent
+    reload_flag = DATA_DIR / 'mqtt_inputs_reload.json'
+    solar_file = DATA_DIR / 'solar_mqtt_topics.json'
+    climate_file = DATA_DIR / 'climate_mqtt_topics.json'
+    while not STOP.is_set():
+        config = load_active_config()
+        if validate_identity_for_sync(config) and not PENDING_FILE.exists():
+            hub_id = config['device_code']
+            options = config.get('site_config') or {}
+            solar_enabled = options.get('has_solar_panels') == 1
+            climate_count = options.get('climate_count')
+            pilot = hub_id.upper() == 'REM-0021'
+            if pilot:
                 try:
-                    values = await read_solar(address)
-                except RuntimeError as exc:
-                    SOLAR_STATUS = str(exc)
-                else:
-                    current = load_active_config()
-                    if (solar_enabled(current) and not legacy.exists()
-                            and current['hub_identifier'] == config['hub_identifier']
-                            and current['device_code'] == config['device_code']):
-                        await asyncio.to_thread(publish_solar, config['device_code'], values)
-                        SOLAR_STATUS = '4 mesures disponibles dans MQTT'
-        except Exception as exc:
-            diagnostic_error('solar_read_or_publish_error', exc)
-            SOLAR_STATUS = 'Lecture Bluetooth ou publication MQTT indisponible · consultez le journal'
-        await asyncio.sleep(30)
+                    configure_inputs(root, reload_flag, write_json_atomic)
+                except Exception as exc:
+                    diagnostic_error('mqtt_inputs_error', exc)
+
+            climate_installation = 'disabled'
+            if climate_count:
+                try:
+                    install_climate(root)
+                    climate_installation = configure_climate(root)
+                except Exception as exc:
+                    climate_installation = 'error'
+                    diagnostic_error('niu_can_install_error', exc)
+
+            solar_installation = 'disabled'
+            legacy_eco = root / 'custom_components' / 'eco_worthy'
+            use_direct_solar = solar_enabled and not legacy_eco.exists() and not legacy_eco.is_symlink()
+            if solar_enabled and pilot and not use_direct_solar:
+                try:
+                    solar_installation = install_eco_diagnostics(root)
+                except Exception as exc:
+                    solar_installation = 'error'
+                    diagnostic_error('eco_worthy_diagnostic_install_error', exc)
+
+            states = None
+            if (solar_enabled and not use_direct_solar) or climate_count:
+                try:
+                    received = core_api("states")
+                    if not isinstance(received, list):
+                        raise ValueError("Réponse d’états Home Assistant invalide")
+                    states = received
+                except Exception as exc:
+                    diagnostic_error('optional_module_states_error', exc)
+
+            if climate_count is not None:
+                active_climate = None
+                try:
+                    active_climate = publish_climate(root, hub_id, climate_count, climate_file,
+                                                     load_json, write_json_atomic, states=states)
+                except Exception as exc:
+                    diagnostic_error('niu_can_mqtt_error', exc)
+                CLIMATE_STATUS = {'installation': climate_installation, 'mqtt_entities': active_climate}
+
+            if 'has_solar_panels' in options:
+                solar_states = states
+                rows = diagnostic_rows(states or []) if solar_enabled else []
+                if use_direct_solar:
+                    solar_installation = 'direct_wait'
+                    solar_states = None
+                    try:
+                        addon = load_json(ADDON_OPTIONS) or {}
+                        address = (addon.get('solar_bluetooth_address') or '').strip()
+                        result = asyncio.run(read_solar(address))
+                        current = load_active_config()
+                        if (not validate_identity_for_sync(current) or PENDING_FILE.exists()
+                                or current['device_code'] != hub_id or legacy_eco.exists()):
+                            continue
+                        solar_enabled = (current.get('site_config') or {}).get('has_solar_panels') == 1
+                        if solar_enabled:
+                            solar_states, rows = direct_snapshot(*result)
+                            solar_installation = 'direct'
+                    except Exception as exc:
+                        diagnostic_error('eco_worthy_direct_read_error', exc)
+                SOLAR_DIAGNOSTICS = {"installation": solar_installation, "registres": rows}
+                try:
+                    if not solar_enabled or solar_states is not None:
+                        SOLAR_STATUS = publish_solar(root, hub_id, solar_enabled, solar_file,
+                                                     load_json, write_json_atomic, states=solar_states)
+                    else:
+                        SOLAR_STATUS = {}
+                except Exception as exc:
+                    SOLAR_STATUS = {}
+                    diagnostic_error('eco_worthy_mqtt_error', exc)
+        STOP.wait(MQTT_STATE_REFRESH)
 
 
 def netbird_enrollment(source):
@@ -999,6 +1132,9 @@ def dashboard_status():
             ) if key in site},
             'netbird': NETBIRD_STATUS,
             'solar': SOLAR_STATUS,
+            'solar_diagnostics': SOLAR_DIAGNOSTICS,
+            'climate': CLIMATE_STATUS,
+            'mqtt_broker': MQTT_BROKER_STATUS,
             'discovery': DISCOVERY_STATUS,
             'discovery_enabled': TUYA_DISCOVERY_ENABLED,
             **MODULE_STATUS,
@@ -1122,7 +1258,8 @@ if __name__ == '__main__':
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
-    Thread(target=asyncio.run, args=(solar_loop(),), daemon=True).start()
+    Thread(target=homeassistant_features_loop, daemon=True).start()
+    Thread(target=mqtt_dependency_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
         Thread(target=tuya_state_loop, daemon=True).start()

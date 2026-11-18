@@ -1,7 +1,6 @@
 """Read the ECO-WORTHY MPPT over Bluetooth and publish its measurements."""
 
 import asyncio
-import json
 
 NOTIFY_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 REQUEST_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
@@ -66,26 +65,24 @@ async def read_solar(address):
         "load_voltage": measures[5] / 10,
         "temperature": measures[9],
         "load_state": {0: "OFF", 1: "ON"}.get(load[14], "Inconnu"),
-    }
+    }, measures, load
 
 
-def publish_solar(hub_id, values):
-    from hub_mqtt import mqtt_service, publish_samples
-
-    device_id = f"niusmart_{hub_id}_eco_worthy"
-    messages = []
-    for key, (name, unit, device_class) in SENSORS.items():
-        unique_id = f"{device_id}_{key}"
-        state_topic = f"niusmart/{hub_id}/solar/eco_worthy/{key}/state"
-        config = {
-            "name": name, "unique_id": unique_id, "state_topic": state_topic,
-            "device": {"identifiers": [device_id], "name": "ECO-WORTHY MPPT"},
-            "expire_after": 180,
-        }
-        if unit:
-            config.update(unit_of_measurement=unit, device_class=device_class, state_class="measurement")
-        messages.extend((
-            (f"homeassistant/sensor/{unique_id}/config", json.dumps(config), True),
-            (state_topic, str(values[key]), False),
-        ))
-    publish_samples(mqtt_service(), messages)
+def direct_snapshot(values, measures, load):
+    """Adapt the add-on's Bluetooth reader to the shared solar publisher."""
+    states = [
+        {"entity_id": f"sensor.eco_worthy_{key}", "state": str(values[key]),
+         "attributes": {"friendly_name": f"ECO-WORTHY {key.replace('_', ' ')}",
+                        **({"unit_of_measurement": unit, "device_class": kind} if unit else {})}}
+        for key, (_, unit, kind) in SENSORS.items()
+    ]
+    registers = []
+    for block, start, raw_values, first in (("L01", 0, measures, 1), ("L02", 0x0401, load, 16)):
+        for offset, raw in enumerate(raw_values):
+            address = start + offset
+            registers.append({"numero": first + offset, "bloc": block, "adresse": f"0x{address:04X}",
+                              "decimale": raw, "hexadecimale": f"0x{raw:04X}",
+                              "repere": {2: "Tension batterie", 5: "Tension de sortie utilisée par Niu Hub",
+                                         9: "Température selon le code actuel, à vérifier",
+                                         0x040F: "État LOAD possible"}.get(address, "Non identifié")})
+    return states, registers
