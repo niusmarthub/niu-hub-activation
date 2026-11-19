@@ -1006,6 +1006,40 @@ def solar_web_sync_loop():
         STOP.wait(interval)
 
 
+def entity_state_sync_loop():
+    from hub_state_sync import RECONNECT_INTERVAL, sync_states
+
+    sent = {}
+    previous_identity = None
+    interval = RECONNECT_INTERVAL
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            if not validate_identity_for_sync(config) or PENDING_FILE.exists():
+                sent.clear()
+                previous_identity = None
+                interval = RECONNECT_INTERVAL
+            else:
+                identity_fields = ('site_id', 'hub_identifier', 'device_code', 'api_base_url', 'api_key')
+                identity = tuple(config[field] for field in identity_fields)
+                if identity != previous_identity:
+                    sent.clear()
+                    previous_identity = identity
+
+                def still_active():
+                    if STOP.is_set() or PENDING_FILE.exists():
+                        return False
+                    current = load_active_config() or {}
+                    return tuple(current.get(field) for field in identity_fields) == identity
+
+                sync_states(config, validate_base_url(config['api_base_url']), sent, still_active)
+                interval = RECONNECT_INTERVAL
+        except Exception as exc:
+            diagnostic_error('entity_state_sync_error', exc)
+            interval = min(interval * 2, 30)
+        STOP.wait(interval)
+
+
 def homeassistant_features_loop():
     from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
     from hub_solar import (direct_diagnostic_rows, legacy_measures, read_solar,
@@ -1339,6 +1373,7 @@ if __name__ == '__main__':
     Thread(target=netbird_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
+    Thread(target=entity_state_sync_loop, daemon=True).start()
     Thread(target=mqtt_dependency_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
