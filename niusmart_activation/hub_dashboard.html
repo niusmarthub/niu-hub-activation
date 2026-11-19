@@ -52,6 +52,7 @@
     th { font-size: .875rem; color: #bed0df; }
     td:first-child { white-space: nowrap; width: 4rem; }
     tr:target { background: #193e60; }
+    #solarMetrics, #climateMetrics { display: grid; gap: 16px; }
     .muted { font-size: .895rem; }
   </style>
 </head>
@@ -66,6 +67,9 @@
         <h2 id="hubTitle">État du hub</h2>
         <strong id="hubState" role="status">Vérification en cours…</strong>
       </div>
+      <dl id="syncRow" hidden>
+        <div class="line"><dt>Dernière synchronisation réussie avec NiuSmart</dt><dd id="lastSync"></dd></div>
+      </dl>
       <form id="activation" hidden>
         <label for="code">Code d’activation NiuSmart</label>
         <input id="code" placeholder="ABCD-1234-ABCD-1234" maxlength="19" autocomplete="off" required>
@@ -106,6 +110,7 @@
       <section class="panel" id="climatePanel" aria-labelledby="climateTitle" hidden>
         <h2 id="climateTitle">Climatisation Niu CAN</h2>
         <p id="climateStatus" role="status"></p>
+        <div id="climateMetrics"></div>
       </section>
       <section class="panel" aria-labelledby="modulesTitle">
         <div class="line">
@@ -240,6 +245,45 @@
 
     window.addEventListener('hashchange', () => showLinkedRow(true));
 
+    function formatSyncTime(value, timezone) {
+      const date = new Date(value);
+      if (!value || Number.isNaN(date.getTime())) return 'En attente';
+      const options = {year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short'};
+      try {
+        return date.toLocaleString('fr-CA', {...options, timeZone: timezone || undefined});
+      } catch {
+        return date.toLocaleString('fr-CA', options);
+      }
+    }
+
+    function renderReadings(container, readings) {
+      const groups = new Map();
+      for (const metric of readings) {
+        if (!groups.has(metric.group)) groups.set(metric.group, []);
+        const row = element('div');
+        row.className = 'line';
+        const value = metric.value == null ?
+          (metric.confidence === 'unmapped' ? 'À identifier' : 'Non disponible') :
+          [metric.value, metric.unit].filter(Boolean).join(' ');
+        const display = element('dd', value);
+        if (metric.value != null && metric.confidence === 'probable') {
+          const badge = element('small', 'Probable');
+          badge.className = 'badge warning';
+          display.append(' ', badge);
+        }
+        row.append(element('dt', metric.name), display);
+        groups.get(metric.group).push(row);
+      }
+      container.replaceChildren(...Array.from(groups, ([group, rows]) => {
+        const list = element('dl');
+        list.append(...rows);
+        const section = element('section');
+        section.append(element('h3', group), list);
+        return section;
+      }));
+    }
+
     async function refreshStatus() {
       const response = await fetch('/status', {cache: 'no-store'});
       if (!response.ok) throw new Error('État du hub indisponible.');
@@ -249,7 +293,9 @@
       node('hubState').textContent = data.activated ? `Activé · ${data.hub}` :
         data.pending ? 'Confirmation en attente' :
         data.recovery_needed ? 'Récupération requise' : 'Non activé';
+      node('syncRow').hidden = !data.activated;
       if (!data.activated) return;
+      node('lastSync').textContent = formatSyncTime(data.last_niusmart_sync, data.site_timezone);
 
       node('options').replaceChildren(...Object.entries(optionsNames).map(([key, label]) => {
         const row = element('div');
@@ -275,6 +321,8 @@
           climate.mqtt_entities ? `${climate.mqtt_entities} entités MQTT` : 'En attente d’états Niu CAN') :
         climate.installation === 'waiting_core' ? 'Intégration Niu CAN prête. Redémarrage de Home Assistant requis.' :
         climate.installation === 'error' ? 'Installation Niu CAN indisponible. Consultez le journal.' : 'En attente';
+      renderReadings(node('climateMetrics'), (climate.zones || []).flatMap(({zone, readings}) =>
+        readings.map(reading => ({...reading, group: `Dometic R${zone}`}))));
       const diagnostic = data.solar_diagnostics || {};
       const registers = diagnostic.registres || [];
       const diagnostics = {
@@ -295,22 +343,7 @@
         return row;
       }));
       node('solarPanel').hidden = !data.options.has_solar_panels;
-      const metrics = node('solarMetrics');
-      metrics.replaceChildren();
-      const groups = new Map();
-      for (const metric of Object.values(data.solar || {})) {
-        if (!groups.has(metric.group)) {
-          const list = element('dl');
-          metrics.append(element('h3', metric.group), list);
-          groups.set(metric.group, list);
-        }
-        const row = element('div');
-        row.className = 'line';
-        row.append(element('dt', metric.name), element('dd',
-          metric.value == null ? 'Non disponible' : [metric.value, metric.unit, metric.estimated ? '(calculée)' : ''].filter(Boolean).join(' ')));
-        groups.get(metric.group).append(row);
-      }
-      if (!groups.size) metrics.append(element('p', 'Mesures Home Assistant indisponibles.'));
+      renderReadings(node('solarMetrics'), Object.values(data.solar || {}));
 
       node('moduleCount').textContent = data.scanned_at ?
         `${data.modules.filter(module => module.seen).length} détecté(s) / ${data.modules.length} reçu(s)` : '';

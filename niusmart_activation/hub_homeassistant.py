@@ -1,7 +1,6 @@
 """Home Assistant integration updates and read-only ECO-WORTHY MQTT export."""
 
 import json
-import math
 import os
 import re
 import shutil
@@ -13,6 +12,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 from hub_mqtt import mqtt_service, publish_samples
+from hub_solar import legacy_measures
 
 INPUT_DEVICE = {"identifiers": ["rem-0021_ndih432"], "name": "NDIH-432 module"}
 INPUT_IDS = {f"rem-0021_n4dih32_di{number:02d}" for number in range(1, 33)}
@@ -20,21 +20,40 @@ CAN_SOURCE = Path("/usr/local/share/niu_can")
 TOPIC = re.compile(r"[A-Za-z0-9_-]+")
 INVALID_STATE = {"unknown", "unavailable", ""}
 
-SOLAR_FIELDS = {
-    "pv_voltage": ("Panneau solaire", "Tension PV", ("pv voltage", "solar panel voltage", "solar voltage", "panel voltage", "tension pv", "tension photovoltaïque")),
-    "pv_power": ("Panneau solaire", "Puissance PV", ("pv power", "solar panel power", "solar power", "panel charging power", "puissance pv", "puissance du panneau")),
-    "pv_energy_total": ("Panneau solaire", "Production totale", ("total generation", "total generated energy", "total production", "production totale", "lifetime yield")),
-    "battery_voltage": ("Batterie", "Tension batterie", ("battery voltage", "tension batterie", "tension de la batterie")),
-    "battery_charge_current": ("Batterie", "Courant de charge", ("battery charge current", "battery charging current", "charging current to battery", "courant de charge batterie", "courant de charge de la batterie")),
-    "battery_charge_power": ("Batterie", "Puissance de charge", ("battery charge power", "battery charging power", "puissance de charge batterie", "puissance de charge de la batterie")),
-    "load_voltage": ("Sortie LOAD", "Tension de sortie", ("load voltage", "output voltage", "tension de sortie")),
-    "load_current": ("Sortie LOAD", "Courant de sortie", ("load current", "output current", "courant de sortie")),
-    "load_energy_total": ("Sortie LOAD", "Consommation totale", ("total consumption", "total load energy", "total consumed energy", "consommation totale")),
+SOLAR_CARD = {
+    "load_state": ("État et température", "Sortie LOAD"),
+    "battery_temperature": ("État et température", "Température de la pièce (sonde)"),
+    "pv_voltage": ("Panneau solaire", "Tension PV"),
+    "pv_power": ("Panneau solaire", "Puissance PV"),
+    "pv_energy_total": ("Panneau solaire", "Production totale"),
+    "battery_voltage": ("Batterie", "Tension batterie"),
+    "battery_charge_current": ("Batterie", "Courant de charge"),
+    "battery_charge_power": ("Batterie", "Puissance de charge"),
+    "load_voltage": ("Sortie LOAD", "Tension de sortie"),
+    "load_current": ("Sortie LOAD", "Courant de sortie"),
+    "load_energy_total": ("Sortie LOAD", "Consommation totale (Used)"),
 }
-SOLAR_ALIASES = {**SOLAR_FIELDS, "pv_current": (None, None, ("pv current", "panel current", "solar panel current"))}
-SOLAR_UNITS = {
-    "voltage": {"v", "mv", "kv"}, "power": {"w", "kw", "mw"},
-    "current": {"a", "ma"}, "total": {"wh", "kwh", "mwh", "j", "kj", "mj", "gj"},
+
+# L01 register index, divisor, MQTT unit and device class.
+CONFIRMED_SOLAR_REGISTERS = {
+    "pv_voltage": (0x0001, 10, "V", "voltage"),
+    "battery_voltage": (0x0002, 10, "V", "voltage"),
+    "load_current": (0x0006, 10, "A", "current"),
+    "load_power": (0x0008, 1, "W", "power"),
+    "battery_temperature": (0x0009, 1, "°C", "temperature"),
+}
+
+
+# Associated for field validation. Production remains a raw register until its scale is known.
+PROBABLE_SOLAR_REGISTERS = {
+    "load_voltage": (0x0005, 10, "V", "voltage"),
+    "pv_energy_total": (0x0007, 1, "brut", None),
+}
+
+CLIMATE_CARD = {
+    "state": "État", "mode": "Mode", "fan": "Ventilateur",
+    "heat_setpoint": "Consigne chauffage", "cool_setpoint": "Consigne climatisation",
+    "power_fail": "Coupure d’alimentation",
 }
 
 
@@ -148,112 +167,56 @@ def install_climate(root, source=CAN_SOURCE):
     return True
 
 
-def normalized(value):
-    return " ".join(re.sub(r"[^\w]+|_", " ", str(value).lower()).split())
-
-
-def metric_for(entity_id, name, unit, state):
-    name_keys = (normalized(entity_id.split(".", 1)[-1]), normalized(name))
-    try:
-        if not math.isfinite(float(state)):
-            return None
-    except (TypeError, ValueError):
-        return None
-    unit = str(unit).lower()
-    for metric, (_, _, aliases) in SOLAR_ALIASES.items():
-        if unit not in SOLAR_UNITS[metric.rsplit("_", 1)[-1]]:
-            continue
-        if any(candidate == alias or candidate.endswith(" " + alias)
-               for candidate in name_keys for alias in aliases):
-            return metric
-    return None
-
-
-def solar_payloads(root, hub_id, states):
-    registry = root / ".storage" / "core.entity_registry"
-    rows = json.loads(registry.read_text())["data"]["entities"] if registry.is_file() else []
-    sources = {row["entity_id"]: row for row in rows
-               if normalized(row.get("platform")).replace(" ", "") == "ecoworthy"}
-    mqtt_ids = {row["entity_id"] for row in rows if row.get("platform") == "mqtt"}
+def solar_payloads(hub_id, measures, load=None):
     messages = []
-    grouped = {}
-    for item in states:
-        entity_id = item["entity_id"]
-        domain, _, object_id = entity_id.partition(".")
-        attributes = item.get("attributes", {})
-        name = attributes.get("friendly_name") or object_id
-        source = sources.get(entity_id)
-        prefix_matches = normalized(object_id).replace(" ", "").startswith("ecoworthy")
-        if domain not in ("sensor", "binary_sensor") or not TOPIC.fullmatch(object_id):
-            continue
-        if source is None and not prefix_matches:
-            continue
-        if source and source.get("disabled_by"):
-            continue
-        # Exclude the entities created by this MQTT export even after registry reloads.
-        if entity_id in mqtt_ids or (
-            object_id.startswith("eco_worthy_registres_modbus") and "registres" in attributes
-        ):
-            continue
-        state = item["state"]
-        unit = attributes.get("unit_of_measurement")
-        metric = metric_for(entity_id, name, unit, state)
-        source_key = source.get("unique_id") if source else None
-        if not isinstance(source_key, str) or not TOPIC.fullmatch(source_key):
-            source_key = object_id
-        uid = f"niusmart_{hub_id.lower()}_eco_worthy_{domain}_{source_key}"
-        base = f"niusmart/{hub_id}/solar/eco_worthy/{domain}/{source_key}"
-        config = {
-            "name": name, "unique_id": uid, "state_topic": f"{base}/state",
-            "expire_after": 120,
-            "device": {"identifiers": [f"niusmart_{hub_id.lower()}_eco_worthy"],
-                       "name": f"{hub_id} ECO-WORTHY MPPT"},
-        }
-        if domain == "binary_sensor":
-            config.update(payload_on="on", payload_off="off")
-        for key in ("device_class", "unit_of_measurement", "state_class"):
-            if attributes.get(key) is not None:
-                config[key] = attributes[key]
-        messages.append((f"homeassistant/{domain}/{uid}/config", json.dumps(config), True))
-        if state not in INVALID_STATE:
-            messages.append((config["state_topic"], state, False))
-        if metric:
-            value = {"value": state, "unit": unit, "entity_id": entity_id}
-            grouped.setdefault(metric, []).append(value)
-    for power_key, voltage_key, current_key in (
-        ("pv_power", "pv_voltage", "pv_current"),
-        ("battery_charge_power", "battery_voltage", "battery_charge_current"),
-    ):
-        if grouped.get(power_key) or any(len(grouped.get(key, [])) != 1 for key in (voltage_key, current_key)):
-            continue
-        voltage, current = (grouped[key][0] for key in (voltage_key, current_key))
-        scale = {"v": 1, "mv": 0.001, "kv": 1000, "a": 1, "ma": 0.001}
-        watts = float(voltage["value"]) * scale[voltage["unit"].lower()]
-        watts *= float(current["value"]) * scale[current["unit"].lower()]
-        if not math.isfinite(watts):
-            continue
-        value = str(round(watts, 3))
-        grouped[power_key] = [{"value": value, "unit": "W", "estimated": True}]
-        uid = f"niusmart_{hub_id.lower()}_eco_worthy_calculated_{power_key}"
-        state_topic = f"niusmart/{hub_id}/solar/eco_worthy/calculated/{power_key}/state"
-        config = {
-            "name": SOLAR_FIELDS[power_key][1] + " (calculée)",
-            "unique_id": uid, "state_topic": state_topic, "expire_after": 120,
-            "device_class": "power", "unit_of_measurement": "W", "state_class": "measurement",
-            "device": {"identifiers": [f"niusmart_{hub_id.lower()}_eco_worthy"],
-                       "name": f"{hub_id} ECO-WORTHY MPPT"},
-        }
-        messages.extend(((f"homeassistant/sensor/{uid}/config", json.dumps(config), True),
-                         (state_topic, value, False)))
     status = {
-        key: {"group": group, "name": label,
-              **(grouped[key][0] if len(grouped.get(key, [])) == 1 else {"value": None})}
-        for key, (group, label, _) in SOLAR_FIELDS.items()
+        key: {"group": group, "name": label, "value": None,
+              "confidence": "confirmed" if key in CONFIRMED_SOLAR_REGISTERS else
+              "probable" if key in PROBABLE_SOLAR_REGISTERS or key == "load_state" else "unmapped"}
+        for key, (group, label) in SOLAR_CARD.items()
     }
+    if measures is None and load is None:
+        return messages, status
+    readings = {}
+    for key, (address, divisor, unit, kind) in {
+        **CONFIRMED_SOLAR_REGISTERS, **PROBABLE_SOLAR_REGISTERS,
+    }.items():
+        raw = measures[address] if measures is not None else None
+        value = None if raw is None else str(raw if divisor == 1 else raw / divisor)
+        readings[key] = (value, unit, kind)
+    load_state = {0: "OFF", 1: "ON"}.get(load[14]) if load is not None else None
+    readings["load_state"] = (load_state, None, None)
+
+    for key, (value, unit, kind) in readings.items():
+        probable = key in PROBABLE_SOLAR_REGISTERS or key == "load_state"
+        if key in status:
+            status[key].update(value=value, unit=unit)
+        label = SOLAR_CARD[key][1] if key in SOLAR_CARD else "Puissance de sortie LOAD"
+        if key == "pv_energy_total":
+            label = "Production totale brute (CHG)"
+        domain = "binary_sensor" if key == "load_state" else "sensor"
+        source_key = f"eco_worthy_{'pv_energy_total_raw' if key == 'pv_energy_total' else key}"
+        uid = f"niusmart_{hub_id.lower()}_eco_worthy_{domain}_{source_key}"
+        state_topic = f"niusmart/{hub_id}/solar/eco_worthy/{domain}/{source_key}/state"
+        config = {
+            "name": f"{label} (probable)" if probable else label,
+            "unique_id": uid, "state_topic": state_topic, "expire_after": 120,
+            "device": {"identifiers": [f"niusmart_{hub_id.lower()}_eco_worthy"],
+                       "name": f"{hub_id} ECO-WORTHY MPPT"},
+        }
+        if kind:
+            config.update(device_class=kind, unit_of_measurement=unit, state_class="measurement")
+        if probable or key == "battery_temperature":
+            config["entity_category"] = "diagnostic"
+        if domain == "binary_sensor":
+            config.update(payload_on="ON", payload_off="OFF")
+        messages.append((f"homeassistant/{domain}/{uid}/config", json.dumps(config), True))
+        if value is not None:
+            messages.append((state_topic, value, False))
     return messages, status
 
 
-def publish_solar(root, hub_id, enabled, topic_file, load_json, write_json, *, states=None):
+def publish_solar(root, hub_id, enabled, topic_file, load_json, write_json, *, states=None, measures=None, load=None):
     if not TOPIC.fullmatch(hub_id):
         raise ValueError("Identifiant MQTT solaire invalide")
     saved = load_json(topic_file)
@@ -268,7 +231,11 @@ def publish_solar(root, hub_id, enabled, topic_file, load_json, write_json, *, s
         legacy = {f"homeassistant/sensor/niusmart_{hub_id}_eco_worthy_{key}/config"
                   for key in ("battery_voltage", "load_voltage", "temperature", "load_state")}
     if enabled:
-        messages, status = solar_payloads(root, hub_id, core_api("states") if states is None else states)
+        if measures is None and load is None:
+            states = core_api("states") if states is None else states
+            measures = legacy_measures(root, states)
+            load = legacy_measures(root, states, "l02")
+        messages, status = solar_payloads(hub_id, measures, load)
     else:
         messages, status = [], {}
     topics = {topic for topic, _, retained in messages if retained}
@@ -290,16 +257,34 @@ def publish_solar(root, hub_id, enabled, topic_file, load_json, write_json, *, s
     return status
 
 
-def climate_payloads(root, hub_id, count, states):
+def climate_sources(root):
     registry = root / ".storage" / "core.entity_registry"
     if not registry.is_file():
-        return []
+        return {}
     sources = {}
     for entry in json.loads(registry.read_text())["data"]["entities"]:
         match = re.fullmatch(r"niu_dometic_r([12])_([a-z0-9_]+)", entry.get("unique_id", ""))
         if entry.get("platform") == "niu_can" and not entry.get("disabled_by") and match:
             sources[entry["entity_id"]] = (int(match[1]), match[2])
+    return sources
 
+
+def climate_readings(count, states, sources):
+    zones = {
+        zone: {key: {"name": label, "value": None} for key, label in CLIMATE_CARD.items()}
+        for zone in range(1, count + 1)
+    }
+    for item in states:
+        zone, metric = sources.get(item["entity_id"], (None, None))
+        if zone not in zones or metric not in CLIMATE_CARD or item["state"] in INVALID_STATE:
+            continue
+        zones[zone][metric].update(value=item["state"],
+                                   unit=item.get("attributes", {}).get("unit_of_measurement"))
+    return [{"zone": zone, "readings": list(readings.values())} for zone, readings in zones.items()]
+
+
+def climate_payloads(root, hub_id, count, states):
+    sources = climate_sources(root)
     messages = []
     for item in states:
         entity_id = item["entity_id"]

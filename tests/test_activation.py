@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -69,6 +70,20 @@ class ActivationTest(unittest.TestCase):
             hub.validate_config(conf)
         with self.assertRaises(ValueError):
             hub.validate_config(dict(CONFIG, site_config=None))
+
+    def test_dashboard_keeps_latest_successful_niusmart_sync(self):
+        with patch.object(hub, "load_active_config", return_value=CONFIG), \
+                patch.object(hub, "ensure_backup_after_authenticated_update"):
+            self.assertIsNone(hub.dashboard_status()["last_niusmart_sync"])
+            hub.api = lambda *_: {"success": True, "status": "ok", "changes": {}}
+            hub.synchronize()
+            saved = hub.dashboard_status()
+            self.assertTrue(saved["last_niusmart_sync"].endswith("+00:00"))
+            self.assertEqual(saved["site_timezone"], "America/Toronto")
+            with patch.object(hub, "api", side_effect=OSError("offline")):
+                with self.assertRaises(OSError):
+                    hub.synchronize()
+            self.assertEqual(hub.dashboard_status()["last_niusmart_sync"], saved["last_niusmart_sync"])
 
     def test_update_cannot_change_key_or_server(self):
         self.put_config()

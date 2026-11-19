@@ -11,6 +11,20 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
+## 0.3.18 — tableaux solaire et climatisation REM-0021
+
+- La carte solaire affiche l’état LOAD, la température de la sonde et trois mesures dans chacun des groupes Panneau solaire, Batterie et Sortie LOAD.
+- Les lectures probables sont signalées sur la carte et en diagnostics MQTT. La production candidate CHG reste une valeur brute. La puissance LOAD confirmée reste disponible en MQTT.
+- La carte climatisation affiche une section pour chaque zone Dometic activée. L’état du hub affiche la dernière synchronisation NiuSmart réussie dans le fuseau horaire du site.
+- Les lectures locales solaire et climatisation reprennent cinq secondes après la fin du cycle précédent. L’intervalle de synchronisation NiuSmart reste configurable.
+- Le test sur le matériel du REM-0021 reste à effectuer.
+
+## 0.3.17 — carte solaire REM-0021
+
+- La carte ECO-WORTHY affiche dix lectures. Tension PV, tension batterie, courant LOAD et puissance LOAD proviennent de L01. Les six autres lectures affichent « À valider ».
+- La découverte MQTT publie ces quatre mesures et la température de la sonde comme diagnostic. Le paquet s’installe comme mise à jour de Niu Hub Activation dans son dépôt existant.
+- Le test sur le matériel du REM-0021 reste à effectuer.
+
 ## 0.3.16 — options et diagnostic REM-0021
 
 - Installez ou mettez à jour Niu Hub Activation. L’application réutilise le service MQTT fourni par le Supervisor et peut demander l’installation de Mosquitto si aucun service ni aucune configuration MQTT existante n’est détecté.

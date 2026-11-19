@@ -1,19 +1,13 @@
 """Read the ECO-WORTHY MPPT over Bluetooth and publish its measurements."""
 
 import asyncio
+import json
+import re
 
 NOTIFY_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 REQUEST_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
 REQUEST_MEASURES = bytes.fromhex("01 03 00 00 00 0F 05 CE")
 REQUEST_LOAD = bytes.fromhex("01 03 04 01 00 0F 55 3E")
-
-SENSORS = {
-    "battery_voltage": ("Tension batterie", "V", "voltage"),
-    "load_voltage": ("Tension sortie LOAD", "V", "voltage"),
-    "temperature": ("Température sonde", "°C", "temperature"),
-    "load_state": ("État sortie LOAD", None, None),
-}
-
 
 def registers(frame):
     if len(frame) != 35 or frame[:3] != b"\x01\x03\x1e":
@@ -26,6 +20,31 @@ def registers(frame):
     if frame[-2:] != crc.to_bytes(2, "little"):
         raise ValueError("CRC Modbus invalide.")
     return [int.from_bytes(frame[i:i + 2], "big") for i in range(3, 33, 2)]
+
+
+def legacy_measures(root, states, block="l01"):
+    """Read a validated Modbus frame from the installed Home Assistant driver."""
+    registry = root / ".storage" / "core.entity_registry"
+    entries = json.loads(registry.read_text())["data"]["entities"] if registry.is_file() else []
+    mqtt_ids = {entry["entity_id"] for entry in entries if entry.get("platform") == "mqtt"}
+    candidates = [("registres_modbus", f"trame_{block}")]
+    if block == "l01":
+        candidates.append(("trame_modbus", None))
+    for source, attribute in candidates:
+        for item in states:
+            entity_id = item["entity_id"]
+            if entity_id in mqtt_ids or not re.fullmatch(rf"sensor\.eco_worthy_{source}(?:_[0-9]+)?", entity_id):
+                continue
+            state = item["state"]
+            if state in ("unavailable", "unknown"):
+                continue
+            frame = item.get("attributes", {}).get(attribute) if attribute else state
+            if isinstance(frame, str):
+                try:
+                    return registers(bytes.fromhex(frame))
+                except ValueError:
+                    continue
+    return None
 
 
 async def read_solar(address):
@@ -59,30 +78,22 @@ async def read_solar(address):
             if request == REQUEST_MEASURES:
                 await asyncio.sleep(0.3)
 
-    measures, load = responses
-    return {
-        "battery_voltage": measures[2] / 10,
-        "load_voltage": measures[5] / 10,
-        "temperature": measures[9],
-        "load_state": {0: "OFF", 1: "ON"}.get(load[14], "Inconnu"),
-    }, measures, load
+    return tuple(responses)
 
 
-def direct_snapshot(values, measures, load):
-    """Adapt the add-on's Bluetooth reader to the shared solar publisher."""
-    states = [
-        {"entity_id": f"sensor.eco_worthy_{key}", "state": str(values[key]),
-         "attributes": {"friendly_name": f"ECO-WORTHY {key.replace('_', ' ')}",
-                        **({"unit_of_measurement": unit, "device_class": kind} if unit else {})}}
-        for key, (_, unit, kind) in SENSORS.items()
-    ]
+def direct_diagnostic_rows(measures, load):
+    notes = {
+        0x0001: "Tension PV",
+        0x0002: "Tension batterie",
+        0x0006: "Courant de sortie LOAD",
+        0x0008: "Puissance de sortie LOAD",
+        0x0009: "Température de la sonde",
+    }
     registers = []
     for block, start, raw_values, first in (("L01", 0, measures, 1), ("L02", 0x0401, load, 16)):
         for offset, raw in enumerate(raw_values):
             address = start + offset
             registers.append({"numero": first + offset, "bloc": block, "adresse": f"0x{address:04X}",
                               "decimale": raw, "hexadecimale": f"0x{raw:04X}",
-                              "repere": {2: "Tension batterie", 5: "Tension de sortie utilisée par Niu Hub",
-                                         9: "Température selon le code actuel, à vérifier",
-                                         0x040F: "État LOAD possible"}.get(address, "Non identifié")})
-    return states, registers
+                              "repere": notes.get(address, "Non identifié")})
+    return registers

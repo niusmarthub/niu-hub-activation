@@ -41,11 +41,9 @@ class OptionalModuleTests(unittest.TestCase):
         self.assertEqual(sensor.read_text(), "modification locale")
 
     def test_direct_bluetooth_reader_exposes_two_blocks_with_stable_numbers(self):
-        from hub_solar import direct_snapshot
+        from hub_solar import direct_diagnostic_rows
 
-        values = {"battery_voltage": 26.6, "load_voltage": 26.6, "temperature": 18, "load_state": "ON"}
-        states, rows = direct_snapshot(values, list(range(15)), list(range(15, 30)))
-        self.assertEqual(len(states), 4)
+        rows = direct_diagnostic_rows(list(range(15)), list(range(15, 30)))
         self.assertEqual(len(rows), 30)
         self.assertEqual(rows[0]["decimale"], 0)
         self.assertEqual(rows[15]["adresse"], "0x0401")
@@ -64,18 +62,27 @@ class OptionalModuleTests(unittest.TestCase):
         self.assertEqual(eco.diagnostic_rows([state]), [])
 
     def test_solar_disable_retracts_owned_retained_config_and_can_reenable(self):
-        states = [{"entity_id": "sensor.eco_worthy_pv_voltage", "state": "26.7",
-                   "attributes": {"unit_of_measurement": "V"}}]
+        measures = [0] * 15
+        measures[1] = 267
         with patch.object(ha, "mqtt_service"), patch.object(ha, "publish_samples") as broker:
             run = lambda enabled: ha.publish_solar(self.root, "REM-0021", enabled, "solar",
-                                                   self.load, self.save, states=states)
+                                                   self.load, self.save, measures=measures)
+            prefix = "homeassistant/sensor/niusmart_rem-0021_eco_worthy_sensor_eco_worthy_"
+            retired = prefix + "trame_modbus/config"
+            battery = prefix + "battery_voltage/config"
+            self.ledger["solar"] = {"hub_id": "REM-0021", "topics": [retired, battery],
+                                    "legacy_cleared": True}
             run(True)
-            [topic] = self.ledger["solar"]["topics"]
+            topics = self.ledger["solar"]["topics"]
+            self.assertEqual(len(topics), 8)
+            self.assertIn(battery, topics)
+            self.assertNotIn(retired, topics)
+            self.assertIn((retired, "", True), broker.call_args.args[1])
             run(False)
-            self.assertEqual(broker.call_args.args[1], [(topic, "", True)])
+            self.assertEqual(broker.call_args.args[1], [(topic, "", True) for topic in topics])
             self.assertEqual(self.ledger["solar"]["topics"], [])
             run(True)
-            self.assertEqual(self.ledger["solar"]["topics"], [topic])
+            self.assertEqual(self.ledger["solar"]["topics"], topics)
 
     def test_climate_removes_one_zone_and_all_when_disabled(self):
         storage = self.root / ".storage"

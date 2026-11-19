@@ -22,25 +22,71 @@ class MqttFeaturesTests(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in configs], [f"Switch {i}" for i in range(1, 13)])
         self.assertEqual(configs[6]["command_topic"], "niusmart/REM-0021/tuya/two/11/set")
 
-    def test_solar_groups_only_measured_or_explicitly_calculated_values(self):
-        def sensor(object_id, state, unit):
-            return {"entity_id": f"sensor.eco_worthy_{object_id}", "state": state,
-                    "attributes": {"unit_of_measurement": unit}}
-        states = [sensor("battery_voltage", "26.4", "V"),
-                  sensor("battery_charging_current", "2", "A"),
-                  sensor("pv_voltage", "83", "V"),
-                  sensor("daily_generation", "240", "Wh"),
-                  sensor("load_current", "0.4", "A")]
+    def test_solar_publishes_confirmed_and_probable_l01_l02_measures(self):
+        from hub_solar import legacy_measures
+
+        frame = (
+            "01 03 1e 00 00 01 0a 01 09 00 00 00 00 01 09 00 06 00 00 "
+            "00 0f 00 12 00 19 00 46 00 00 00 00 00 40 16 5a"
+        )
+        l02 = (
+            "01 03 1e 13 fd 14 50 01 2c 01 f4 00 0a 00 0a 00 12 00 1e "
+            "00 15 00 1e 00 05 00 0a 00 06 00 1e 00 01 06 4f"
+        )
+        state = {"entity_id": "sensor.eco_worthy_registres_modbus", "state": "30",
+                 "attributes": {"trame_l01": frame, "trame_l02": l02}}
         with tempfile.TemporaryDirectory() as directory:
-            messages, fields = ha.solar_payloads(Path(directory), "REM-0021", states)
-        self.assertEqual(len(fields), 9)
-        self.assertEqual(fields["pv_voltage"]["value"], "83")
-        self.assertIsNone(fields["pv_energy_total"]["value"])
-        self.assertIsNone(fields["load_energy_total"]["value"])
-        self.assertEqual(fields["battery_charge_power"]["value"], "52.8")
-        self.assertTrue(fields["battery_charge_power"]["estimated"])
-        self.assertTrue(any(topic.endswith("/calculated/battery_charge_power/state") and value == "52.8"
-                            for topic, value, _ in messages))
+            root = Path(directory)
+            measures = legacy_measures(root, [state])
+            load = legacy_measures(root, [state], "l02")
+            state["attributes"]["trame_l01"] = frame[:-2] + "00"
+            self.assertIsNone(legacy_measures(root, [state]))
+            original_driver = {"entity_id": "sensor.eco_worthy_trame_modbus", "state": frame}
+            self.assertEqual(legacy_measures(root, [state, original_driver]), measures)
+
+        messages, fields = ha.solar_payloads("REM-0021", measures, load)
+        groups = {entry["group"] for entry in fields.values()}
+        self.assertEqual({group: sum(entry["group"] == group for entry in fields.values())
+                          for group in groups}, {
+            "État et température": 2, "Panneau solaire": 3, "Batterie": 3, "Sortie LOAD": 3,
+        })
+        self.assertEqual({key: (entry["value"], entry["unit"]) for key, entry in fields.items()
+                          if entry["confidence"] == "confirmed"}, {
+            "pv_voltage": ("26.6", "V"), "battery_voltage": ("26.5", "V"),
+            "load_current": ("0.6", "A"), "battery_temperature": ("18", "°C"),
+        })
+        self.assertEqual({key: entry["value"] for key, entry in fields.items()
+                          if entry["confidence"] == "probable"},
+                         {"load_state": "ON", "load_voltage": "26.5", "pv_energy_total": "0"})
+        self.assertTrue(all(entry["value"] is None for entry in fields.values()
+                            if entry["confidence"] == "unmapped"))
+        configs = {json.loads(payload)["unique_id"].rsplit("_eco_worthy_", 1)[1]: json.loads(payload)
+                   for _, payload, retain in messages if retain}
+        self.assertEqual(len(configs), 8)
+        self.assertIn((configs["load_power"]["state_topic"], "15", False), messages)
+        self.assertIn((configs["load_state"]["state_topic"], "ON", False), messages)
+        self.assertEqual(configs["load_state"]["payload_off"], "OFF")
+        self.assertNotIn("device_class", configs["pv_energy_total_raw"])
+        self.assertEqual(configs["pv_energy_total_raw"]["entity_category"], "diagnostic")
+        self.assertEqual(ha.solar_payloads("REM-0021", [0] * 15)[1]["load_current"]["value"], "0.0")
+        self.assertEqual(ha.solar_payloads("REM-0021", None, [0] * 15)[1]["load_state"]["value"], "OFF")
+        self.assertIsNone(ha.solar_payloads("REM-0021", None, [2] * 15)[1]["load_state"]["value"])
+        self.assertEqual(ha.solar_payloads("REM-0021", None)[0], [])
+
+    def test_climate_dashboard_reads_only_configured_zones(self):
+        states = [{"entity_id": "sensor.r1_cool", "state": "72",
+                   "attributes": {"unit_of_measurement": "°F"}},
+                  {"entity_id": "sensor.r2_cool", "state": "75"},
+                  {"entity_id": "sensor.r1_mode", "state": "unavailable"}]
+        sources = {"sensor.r1_cool": (1, "cool_setpoint"), "sensor.r2_cool": (2, "cool_setpoint"),
+                   "sensor.r1_mode": (1, "mode")}
+        [zone] = ha.climate_readings(1, states, sources)
+        self.assertEqual(zone["zone"], 1)
+        self.assertIn({"name": "Consigne climatisation", "value": "72", "unit": "°F"},
+                      zone["readings"])
+        self.assertIn({"name": "Mode", "value": None}, zone["readings"])
+        self.assertEqual(ha.climate_readings(0, states, sources), [])
+        self.assertEqual(len(ha.climate_readings(2, [], {})), 2)
 
     def test_reload_is_retried_without_rewriting_grouped_yaml(self):
         configuration = "mqtt:\n  binary_sensor:\n" + "".join(

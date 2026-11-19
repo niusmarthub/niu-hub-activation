@@ -87,6 +87,7 @@ ADDON_OPTIONS = Path('/data/options.json')
 SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '3600')))
 TUYA_READ_INTERVAL = 1
 MQTT_STATE_REFRESH = 30
+FEATURE_STATE_REFRESH = 5
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
@@ -604,6 +605,15 @@ def synchronize():
             diagnostic('sync_apply', site_id=config['site_id'], result='no_change')
         # Au premier update authentifie, initialiser le backup des anciens Hubs.
         ensure_backup_after_authenticated_update(config)
+        if response.get('status') in ('ok', 'update'):
+            try:
+                write_json_atomic(DATA_DIR / 'last_niusmart_sync.json', {
+                    'hub_identifier': config['hub_identifier'],
+                    'site_id': config['site_id'],
+                    'at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                })
+            except OSError as exc:
+                diagnostic_error('sync_timestamp_error', exc)
         diagnostic('sync_complete', site_id=config['site_id'], result='ok')
         if response.get('key_update_pending') is True:
             # Rotation distincte: exige une config COMPLETE, refuse sinon.
@@ -960,9 +970,9 @@ def mqtt_dependency_loop():
 
 def homeassistant_features_loop():
     from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
-    from hub_solar import direct_snapshot, read_solar
-    from hub_homeassistant import (configure_climate, configure_inputs, core_api, install_climate,
-                                  publish_climate, publish_solar)
+    from hub_solar import direct_diagnostic_rows, read_solar
+    from hub_homeassistant import (climate_readings, climate_sources, configure_climate, configure_inputs,
+                                  core_api, install_climate, publish_climate, publish_solar, solar_payloads)
 
     global SOLAR_STATUS, SOLAR_DIAGNOSTICS, CLIMATE_STATUS
     root = SHARED_FILE.parent.parent
@@ -1019,39 +1029,45 @@ def homeassistant_features_loop():
                                                      load_json, write_json_atomic, states=states)
                 except Exception as exc:
                     diagnostic_error('niu_can_mqtt_error', exc)
-                CLIMATE_STATUS = {'installation': climate_installation, 'mqtt_entities': active_climate}
+                zones = climate_readings(climate_count, [], {})
+                if climate_count and states is not None:
+                    try:
+                        zones = climate_readings(climate_count, states, climate_sources(root))
+                    except Exception as exc:
+                        diagnostic_error('niu_can_dashboard_error', exc)
+                CLIMATE_STATUS = {'installation': climate_installation, 'mqtt_entities': active_climate,
+                                  'zones': zones}
 
             if 'has_solar_panels' in options:
-                solar_states = states
+                direct_measures = direct_load = None
                 rows = diagnostic_rows(states or []) if solar_enabled else []
                 if use_direct_solar:
                     solar_installation = 'direct_wait'
-                    solar_states = None
                     try:
                         addon = load_json(ADDON_OPTIONS) or {}
                         address = (addon.get('solar_bluetooth_address') or '').strip()
-                        result = asyncio.run(read_solar(address))
+                        measures, load = asyncio.run(read_solar(address))
                         current = load_active_config()
                         if (not validate_identity_for_sync(current) or PENDING_FILE.exists()
                                 or current['device_code'] != hub_id or legacy_eco.exists()):
                             continue
                         solar_enabled = (current.get('site_config') or {}).get('has_solar_panels') == 1
                         if solar_enabled:
-                            solar_states, rows = direct_snapshot(*result)
+                            rows = direct_diagnostic_rows(measures, load)
+                            direct_measures, direct_load = measures, load
                             solar_installation = 'direct'
                     except Exception as exc:
                         diagnostic_error('eco_worthy_direct_read_error', exc)
                 SOLAR_DIAGNOSTICS = {"installation": solar_installation, "registres": rows}
                 try:
-                    if not solar_enabled or solar_states is not None:
-                        SOLAR_STATUS = publish_solar(root, hub_id, solar_enabled, solar_file,
-                                                     load_json, write_json_atomic, states=solar_states)
-                    else:
-                        SOLAR_STATUS = {}
+                    SOLAR_STATUS = publish_solar(root, hub_id, solar_enabled, solar_file,
+                                                 load_json, write_json_atomic,
+                                                 states=[] if use_direct_solar else states or [],
+                                                 measures=direct_measures, load=direct_load)
                 except Exception as exc:
-                    SOLAR_STATUS = {}
+                    SOLAR_STATUS = solar_payloads(hub_id, None)[1] if solar_enabled else {}
                     diagnostic_error('eco_worthy_mqtt_error', exc)
-        STOP.wait(MQTT_STATE_REFRESH)
+        STOP.wait(FEATURE_STATE_REFRESH)
 
 
 def netbird_enrollment(source):
@@ -1125,8 +1141,16 @@ def dashboard_status():
     }
     if activated:
         site = config.get('site_config') or {}
+        sync = load_json(DATA_DIR / 'last_niusmart_sync.json')
+        last_sync = None
+        if isinstance(sync, dict) and (sync.get('hub_identifier'), sync.get('site_id')) == (
+            config['hub_identifier'], config['site_id']
+        ):
+            last_sync = sync.get('at')
         status.update({
             'hub': config['device_code'],
+            'last_niusmart_sync': last_sync,
+            'site_timezone': site.get('timezone'),
             'options': {key: site[key] for key in (
                 SITE_FLAG_FIELDS | {'toilet_count', 'door_count', 'climate_count'}
             ) if key in site},
