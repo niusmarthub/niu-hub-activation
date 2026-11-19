@@ -88,6 +88,7 @@ SYNC_INTERVAL = max(60, int(os.environ.get('NIU_SYNC_INTERVAL', '3600')))
 TUYA_READ_INTERVAL = 1
 MQTT_STATE_REFRESH = 30
 FEATURE_STATE_REFRESH = 5
+SOLAR_WEB_INTERVAL = 30
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
@@ -112,6 +113,7 @@ TUYA_TARGETS = None
 MODULE_STATUS = {'scanned_at': None, 'modules': [], 'error': None, 'energy_mqtt': 'En attente de l’inventaire',
                  'tuya_mqtt': 'En attente de l’inventaire'}
 SOLAR_STATUS = {}
+SOLAR_WEB_SAMPLE = None
 SOLAR_DIAGNOSTICS = {"installation": "pending", "registres": []}
 NETBIRD_STATUS = 'Vérification en attente'
 MQTT_BROKER_STATUS = 'pending'
@@ -968,13 +970,50 @@ def mqtt_dependency_loop():
         STOP.wait(60)
 
 
+def send_solar_web_sample(config, sample):
+    request = urllib.request.Request(
+        validate_base_url(config['api_base_url']) + '/solar_data_api.php',
+        data=json.dumps({**sample, 'site_id': config['site_id']}, allow_nan=False).encode('utf-8'),
+        headers={'Accept': 'application/json', 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    request.add_unredirected_header('X-API-Key', config['api_key'])
+    with urllib.request.urlopen(request, timeout=8, context=ssl.create_default_context()) as response:
+        reply = json.load(response)
+    if (not isinstance(reply, dict) or reply.get('success') is not True
+            or type(reply.get('site_id')) is not int or reply['site_id'] != config['site_id']):
+        raise RuntimeError('Synchronisation solaire refusée')
+
+
+def solar_web_sync_loop():
+    sent = None
+    interval = SOLAR_WEB_INTERVAL
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            sample = SOLAR_WEB_SAMPLE
+            if (sample and sample is not sent and validate_identity_for_sync(config)
+                    and not PENDING_FILE.exists()
+                    and sample[0] == (config['site_id'], config['hub_identifier'])
+                    and (config.get('site_config') or {}).get('has_solar_panels') == 1
+                    and 0 <= time.time() - sample[1]['sampled_at'] <= 60):
+                send_solar_web_sample(config, sample[1])
+                sent = sample
+                interval = SOLAR_WEB_INTERVAL
+        except Exception as exc:
+            diagnostic_error('solar_web_sync_error', exc)
+            interval = min(interval * 2, 300)
+        STOP.wait(interval)
+
+
 def homeassistant_features_loop():
     from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
-    from hub_solar import direct_diagnostic_rows, read_solar
+    from hub_solar import (direct_diagnostic_rows, legacy_measures, read_solar,
+                           recently_reported, web_solar_readings)
     from hub_homeassistant import (climate_readings, climate_sources, configure_climate, configure_inputs,
                                   core_api, install_climate, publish_climate, publish_solar, solar_payloads)
 
-    global SOLAR_STATUS, SOLAR_DIAGNOSTICS, CLIMATE_STATUS
+    global SOLAR_STATUS, SOLAR_DIAGNOSTICS, CLIMATE_STATUS, SOLAR_WEB_SAMPLE
     root = SHARED_FILE.parent.parent
     reload_flag = DATA_DIR / 'mqtt_inputs_reload.json'
     solar_file = DATA_DIR / 'solar_mqtt_topics.json'
@@ -1059,6 +1098,22 @@ def homeassistant_features_loop():
                     except Exception as exc:
                         diagnostic_error('eco_worthy_direct_read_error', exc)
                 SOLAR_DIAGNOSTICS = {"installation": solar_installation, "registres": rows}
+                SOLAR_WEB_SAMPLE = None
+                if solar_enabled:
+                    try:
+                        sampled_at = int(time.time())
+                        if use_direct_solar:
+                            measures, load = direct_measures, direct_load
+                        else:
+                            fresh_states = list(recently_reported(states or [], sampled_at))
+                            measures = legacy_measures(root, fresh_states)
+                            load = legacy_measures(root, fresh_states, "l02")
+                        readings = web_solar_readings(solar_payloads(hub_id, measures, load)[1])
+                        if readings:
+                            SOLAR_WEB_SAMPLE = ((config['site_id'], config['hub_identifier']),
+                                                {'sampled_at': sampled_at, 'readings': readings})
+                    except Exception as exc:
+                        diagnostic_error('solar_web_sample_error', exc)
                 try:
                     SOLAR_STATUS = publish_solar(root, hub_id, solar_enabled, solar_file,
                                                  load_json, write_json_atomic,
@@ -1283,6 +1338,7 @@ if __name__ == '__main__':
     Thread(target=sync_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
+    Thread(target=solar_web_sync_loop, daemon=True).start()
     Thread(target=mqtt_dependency_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()

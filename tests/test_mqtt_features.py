@@ -48,12 +48,12 @@ class MqttFeaturesTests(unittest.TestCase):
         groups = {entry["group"] for entry in fields.values()}
         self.assertEqual({group: sum(entry["group"] == group for entry in fields.values())
                           for group in groups}, {
-            "État et température": 2, "Panneau solaire": 3, "Batterie": 3, "Sortie LOAD": 3,
+            "État de la sortie": 1, "Panneau solaire": 3, "Batterie": 3, "Sortie LOAD": 3,
         })
         self.assertEqual({key: (entry["value"], entry["unit"]) for key, entry in fields.items()
                           if entry["confidence"] == "confirmed"}, {
             "pv_voltage": ("26.6", "V"), "battery_voltage": ("26.5", "V"),
-            "load_current": ("0.6", "A"), "battery_temperature": ("18", "°C"),
+            "load_current": ("0.6", "A"),
         })
         self.assertEqual({key: entry["value"] for key, entry in fields.items()
                           if entry["confidence"] == "probable"},
@@ -63,6 +63,12 @@ class MqttFeaturesTests(unittest.TestCase):
         configs = {json.loads(payload)["unique_id"].rsplit("_eco_worthy_", 1)[1]: json.loads(payload)
                    for _, payload, retain in messages if retain}
         self.assertEqual(len(configs), 8)
+        temperature = configs["battery_temperature"]
+        self.assertEqual(temperature["device_class"], "temperature")
+        self.assertEqual(temperature["unit_of_measurement"], "°C")
+        self.assertNotIn("entity_category", temperature)
+        self.assertIn((temperature["state_topic"], "18", False), messages)
+        self.assertNotIn("battery_temperature", fields)
         self.assertIn((configs["load_power"]["state_topic"], "15", False), messages)
         self.assertIn((configs["load_state"]["state_topic"], "ON", False), messages)
         self.assertEqual(configs["load_state"]["payload_off"], "OFF")
@@ -72,6 +78,30 @@ class MqttFeaturesTests(unittest.TestCase):
         self.assertEqual(ha.solar_payloads("REM-0021", None, [0] * 15)[1]["load_state"]["value"], "OFF")
         self.assertIsNone(ha.solar_payloads("REM-0021", None, [2] * 15)[1]["load_state"]["value"])
         self.assertEqual(ha.solar_payloads("REM-0021", None)[0], [])
+
+    def test_web_solar_omits_unmapped_values_and_rejects_stale_reports(self):
+        from datetime import datetime, timezone
+        from hub_solar import recently_reported, web_solar_readings
+
+        def iso(timestamp):
+            return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+        now = 1760000000
+        fresh = {"last_reported": iso(now - 3), "last_updated": iso(now - 100)}
+        stale = {"last_reported": iso(now - 21), "last_updated": iso(now - 1)}
+        fallback = {"last_updated": iso(now - 2)}
+        malformed = {"last_reported": "invalid"}
+        self.assertEqual(list(recently_reported([fresh, stale, fallback, malformed, {}], now)),
+                         [fresh, fallback])
+        measures, load = [0] * 15, [0] * 15
+        measures[1], measures[9] = 263, 25
+        _, fields = ha.solar_payloads("REM-0021", measures, load)
+        readings = web_solar_readings(fields)
+        self.assertEqual(readings["pv_voltage"], 26.3)
+        self.assertNotIn("battery_temperature", readings)
+        self.assertEqual(readings["load_state"], "OFF")
+        self.assertIs(type(readings["pv_energy_total"]), int)
+        self.assertNotIn("load_energy_total", readings)
 
     def test_climate_dashboard_reads_only_configured_zones(self):
         states = [{"entity_id": "sensor.r1_cool", "state": "72",

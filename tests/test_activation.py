@@ -85,6 +85,22 @@ class ActivationTest(unittest.TestCase):
                     hub.synchronize()
             self.assertEqual(hub.dashboard_status()["last_niusmart_sync"], saved["last_niusmart_sync"])
 
+    def test_web_solar_posts_only_snapshot_using_hub_key(self):
+        sample = {"sampled_at": 1760000000, "readings": {"pv_voltage": 26.3}}
+        with patch.object(hub.urllib.request, "urlopen") as request:
+            request.return_value.__enter__.return_value = io.StringIO('{"success":true,"site_id":2}')
+            hub.send_solar_web_sample(CONFIG, sample)
+            for reply in ('{"success":true}', '{"success":true,"site_id":1}', '{"success":true,"site_id":2.0}'):
+                request.return_value.__enter__.return_value = io.StringIO(reply)
+                with self.assertRaises(RuntimeError):
+                    hub.send_solar_web_sample(CONFIG, sample)
+        posted = request.call_args.args[0]
+        self.assertEqual(posted.full_url, "https://niusmart.com/solar_data_api.php")
+        self.assertEqual(posted.get_method(), "POST")
+        self.assertEqual(posted.get_header("X-api-key"), OLD_KEY)
+        self.assertNotIn("X-api-key", posted.headers)
+        self.assertEqual(json.loads(posted.data), {**sample, 'site_id': 2})
+
     def test_update_cannot_change_key_or_server(self):
         self.put_config()
         for changes in ({'api_key': NEW_KEY}, {'api_base_url': 'https://other.example'}, {'secret': 's'}):

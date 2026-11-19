@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from datetime import datetime
 
 NOTIFY_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 REQUEST_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
@@ -45,6 +46,35 @@ def legacy_measures(root, states, block="l01"):
                 except ValueError:
                     continue
     return None
+
+
+def recently_reported(states, now):
+    """Use Home Assistant's report time to exclude stale Bluetooth states."""
+    for item in states:
+        reported_at = item.get("last_reported") or item.get("last_updated")
+        if not isinstance(reported_at, str):
+            continue
+        try:
+            reported = datetime.fromisoformat(reported_at)
+        except ValueError:
+            continue
+        if reported.tzinfo is not None and -5 <= now - reported.timestamp() <= 20:
+            yield item
+
+
+def web_solar_readings(status):
+    readings = {}
+    for key, row in status.items():
+        value = row["value"]
+        if value is None:
+            continue
+        if key == "load_state":
+            readings[key] = value
+        elif key == "pv_energy_total":
+            readings[key] = int(value)
+        else:
+            readings[key] = float(value)
+    return readings
 
 
 async def read_solar(address):

@@ -21,8 +21,7 @@ TOPIC = re.compile(r"[A-Za-z0-9_-]+")
 INVALID_STATE = {"unknown", "unavailable", ""}
 
 SOLAR_CARD = {
-    "load_state": ("État et température", "Sortie LOAD"),
-    "battery_temperature": ("État et température", "Température de la pièce (sonde)"),
+    "load_state": ("État de la sortie", "Sortie LOAD"),
     "pv_voltage": ("Panneau solaire", "Tension PV"),
     "pv_power": ("Panneau solaire", "Puissance PV"),
     "pv_energy_total": ("Panneau solaire", "Production totale"),
@@ -32,6 +31,11 @@ SOLAR_CARD = {
     "load_voltage": ("Sortie LOAD", "Tension de sortie"),
     "load_current": ("Sortie LOAD", "Courant de sortie"),
     "load_energy_total": ("Sortie LOAD", "Consommation totale (Used)"),
+}
+
+MQTT_ONLY_SOLAR_LABELS = {
+    "battery_temperature": "Température de la sonde",
+    "load_power": "Puissance de sortie LOAD",
 }
 
 # L01 register index, divisor, MQTT unit and device class.
@@ -191,7 +195,7 @@ def solar_payloads(hub_id, measures, load=None):
         probable = key in PROBABLE_SOLAR_REGISTERS or key == "load_state"
         if key in status:
             status[key].update(value=value, unit=unit)
-        label = SOLAR_CARD[key][1] if key in SOLAR_CARD else "Puissance de sortie LOAD"
+        label = SOLAR_CARD[key][1] if key in SOLAR_CARD else MQTT_ONLY_SOLAR_LABELS[key]
         if key == "pv_energy_total":
             label = "Production totale brute (CHG)"
         domain = "binary_sensor" if key == "load_state" else "sensor"
@@ -206,7 +210,7 @@ def solar_payloads(hub_id, measures, load=None):
         }
         if kind:
             config.update(device_class=kind, unit_of_measurement=unit, state_class="measurement")
-        if probable or key == "battery_temperature":
+        if probable:
             config["entity_category"] = "diagnostic"
         if domain == "binary_sensor":
             config.update(payload_on="ON", payload_off="OFF")
