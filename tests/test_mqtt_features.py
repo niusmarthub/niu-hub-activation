@@ -22,7 +22,7 @@ class MqttFeaturesTests(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in configs], [f"Switch {i}" for i in range(1, 13)])
         self.assertEqual(configs[6]["command_topic"], "niusmart/REM-0021/tuya/two/11/set")
 
-    def test_solar_publishes_confirmed_and_probable_l01_l02_measures(self):
+    def test_solar_publishes_validated_l01_l02_measures(self):
         from hub_solar import legacy_measures
 
         frame = (
@@ -48,32 +48,36 @@ class MqttFeaturesTests(unittest.TestCase):
         groups = {entry["group"] for entry in fields.values()}
         self.assertEqual({group: sum(entry["group"] == group for entry in fields.values())
                           for group in groups}, {
-            "État de la sortie": 1, "Panneau solaire": 3, "Batterie": 3, "Sortie LOAD": 3,
+            "État de la sortie": 1, "Panneau solaire": 2, "Batterie": 1, "Sortie LOAD": 3,
         })
-        self.assertEqual({key: (entry["value"], entry["unit"]) for key, entry in fields.items()
-                          if entry["confidence"] == "confirmed"}, {
+        self.assertEqual({key: (entry["value"], entry["unit"]) for key, entry in fields.items()}, {
             "pv_voltage": ("26.6", "V"), "battery_voltage": ("26.5", "V"),
-            "load_current": ("0.6", "A"),
+            "load_voltage": ("26.5", "V"), "load_state": ("ON", None),
+            "pv_power": ("15", "W"),
+            "load_current": ("0.6", "A"), "load_power": ("15", "W"),
         })
-        self.assertEqual({key: entry["value"] for key, entry in fields.items()
-                          if entry["confidence"] == "probable"},
-                         {"load_state": "ON", "load_voltage": "26.5", "pv_energy_total": "0"})
-        self.assertTrue(all(entry["value"] is None for entry in fields.values()
-                            if entry["confidence"] == "unmapped"))
         configs = {json.loads(payload)["unique_id"].rsplit("_eco_worthy_", 1)[1]: json.loads(payload)
                    for _, payload, retain in messages if retain}
         self.assertEqual(len(configs), 8)
+        for key, expected in (("pv_voltage", "26.6"), ("battery_voltage", "26.5"),
+                              ("load_voltage", "26.5")):
+            voltage = configs[key]
+            self.assertEqual(voltage["suggested_display_precision"], 1)
+            self.assertIn((voltage["state_topic"], expected, False), messages)
         temperature = configs["battery_temperature"]
         self.assertEqual(temperature["device_class"], "temperature")
         self.assertEqual(temperature["unit_of_measurement"], "°C")
         self.assertNotIn("entity_category", temperature)
         self.assertIn((temperature["state_topic"], "18", False), messages)
         self.assertNotIn("battery_temperature", fields)
-        self.assertIn((configs["load_power"]["state_topic"], "15", False), messages)
+        for key in ("load_power", "pv_power"):
+            self.assertIn((configs[key]["state_topic"], "15", False), messages)
+            self.assertEqual(configs[key]["unit_of_measurement"], "W")
+        self.assertNotIn("entity_category", configs["load_voltage"])
+        self.assertNotIn("entity_category", configs["load_state"])
         self.assertIn((configs["load_state"]["state_topic"], "ON", False), messages)
         self.assertEqual(configs["load_state"]["payload_off"], "OFF")
-        self.assertNotIn("device_class", configs["pv_energy_total_raw"])
-        self.assertEqual(configs["pv_energy_total_raw"]["entity_category"], "diagnostic")
+        self.assertNotIn("pv_energy_total_raw", configs)
         self.assertEqual(ha.solar_payloads("REM-0021", [0] * 15)[1]["load_current"]["value"], "0.0")
         self.assertEqual(ha.solar_payloads("REM-0021", None, [0] * 15)[1]["load_state"]["value"], "OFF")
         self.assertIsNone(ha.solar_payloads("REM-0021", None, [2] * 15)[1]["load_state"]["value"])
@@ -94,13 +98,15 @@ class MqttFeaturesTests(unittest.TestCase):
         self.assertEqual(list(recently_reported([fresh, stale, fallback, malformed, {}], now)),
                          [fresh, fallback])
         measures, load = [0] * 15, [0] * 15
-        measures[1], measures[9] = 263, 25
+        measures[1], measures[8], measures[9] = 263, 15, 25
         _, fields = ha.solar_payloads("REM-0021", measures, load)
         readings = web_solar_readings(fields)
         self.assertEqual(readings["pv_voltage"], 26.3)
+        self.assertEqual(readings["load_power"], 15.0)
+        self.assertNotIn("pv_power", readings)
         self.assertNotIn("battery_temperature", readings)
         self.assertEqual(readings["load_state"], "OFF")
-        self.assertIs(type(readings["pv_energy_total"]), int)
+        self.assertNotIn("pv_energy_total", readings)
         self.assertNotIn("load_energy_total", readings)
 
     def test_climate_dashboard_reads_only_configured_zones(self):

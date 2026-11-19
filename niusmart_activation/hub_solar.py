@@ -10,6 +10,16 @@ REQUEST_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
 REQUEST_MEASURES = bytes.fromhex("01 03 00 00 00 0F 05 CE")
 REQUEST_LOAD = bytes.fromhex("01 03 04 01 00 0F 55 3E")
 
+REGISTER_NOTES = {
+    0x0001: "Tension PV",
+    0x0002: "Tension batterie",
+    0x0005: "Tension de sortie LOAD",
+    0x0006: "Courant de sortie LOAD",
+    0x0008: "Puissance de sortie LOAD et puissance PV",
+    0x0009: "Température de la sonde",
+    0x040F: "État LOAD (0 = désactivée, 1 = active)",
+}
+
 def registers(frame):
     if len(frame) != 35 or frame[:3] != b"\x01\x03\x1e":
         raise ValueError("Format de réponse Modbus invalide.")
@@ -66,12 +76,11 @@ def web_solar_readings(status):
     readings = {}
     for key, row in status.items():
         value = row["value"]
-        if value is None:
+        # The web API receives the shared power reading under its existing load_power key.
+        if value is None or key == "pv_power":
             continue
         if key == "load_state":
             readings[key] = value
-        elif key == "pv_energy_total":
-            readings[key] = int(value)
         else:
             readings[key] = float(value)
     return readings
@@ -112,18 +121,11 @@ async def read_solar(address):
 
 
 def direct_diagnostic_rows(measures, load):
-    notes = {
-        0x0001: "Tension PV",
-        0x0002: "Tension batterie",
-        0x0006: "Courant de sortie LOAD",
-        0x0008: "Puissance de sortie LOAD",
-        0x0009: "Température de la sonde",
-    }
     registers = []
     for block, start, raw_values, first in (("L01", 0, measures, 1), ("L02", 0x0401, load, 16)):
         for offset, raw in enumerate(raw_values):
             address = start + offset
             registers.append({"numero": first + offset, "bloc": block, "adresse": f"0x{address:04X}",
                               "decimale": raw, "hexadecimale": f"0x{raw:04X}",
-                              "repere": notes.get(address, "Non identifié")})
+                              "repere": REGISTER_NOTES.get(address, "")})
     return registers

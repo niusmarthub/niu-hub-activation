@@ -24,35 +24,28 @@ SOLAR_CARD = {
     "load_state": ("État de la sortie", "Sortie LOAD"),
     "pv_voltage": ("Panneau solaire", "Tension PV"),
     "pv_power": ("Panneau solaire", "Puissance PV"),
-    "pv_energy_total": ("Panneau solaire", "Production totale"),
     "battery_voltage": ("Batterie", "Tension batterie"),
-    "battery_charge_current": ("Batterie", "Courant de charge"),
-    "battery_charge_power": ("Batterie", "Puissance de charge"),
     "load_voltage": ("Sortie LOAD", "Tension de sortie"),
     "load_current": ("Sortie LOAD", "Courant de sortie"),
-    "load_energy_total": ("Sortie LOAD", "Consommation totale (Used)"),
+    "load_power": ("Sortie LOAD", "Puissance de sortie LOAD"),
 }
 
 MQTT_ONLY_SOLAR_LABELS = {
     "battery_temperature": "Température de la sonde",
-    "load_power": "Puissance de sortie LOAD",
 }
 
 # L01 register index, divisor, MQTT unit and device class.
 CONFIRMED_SOLAR_REGISTERS = {
     "pv_voltage": (0x0001, 10, "V", "voltage"),
     "battery_voltage": (0x0002, 10, "V", "voltage"),
+    "load_voltage": (0x0005, 10, "V", "voltage"),
     "load_current": (0x0006, 10, "A", "current"),
+    # The ECO-WORTHY app shows the same L01 reading for both power labels.
+    "pv_power": (0x0008, 1, "W", "power"),
     "load_power": (0x0008, 1, "W", "power"),
     "battery_temperature": (0x0009, 1, "°C", "temperature"),
 }
 
-
-# Associated for field validation. Production remains a raw register until its scale is known.
-PROBABLE_SOLAR_REGISTERS = {
-    "load_voltage": (0x0005, 10, "V", "voltage"),
-    "pv_energy_total": (0x0007, 1, "brut", None),
-}
 
 CLIMATE_CARD = {
     "state": "État", "mode": "Mode", "fan": "Ventilateur",
@@ -174,17 +167,13 @@ def install_climate(root, source=CAN_SOURCE):
 def solar_payloads(hub_id, measures, load=None):
     messages = []
     status = {
-        key: {"group": group, "name": label, "value": None,
-              "confidence": "confirmed" if key in CONFIRMED_SOLAR_REGISTERS else
-              "probable" if key in PROBABLE_SOLAR_REGISTERS or key == "load_state" else "unmapped"}
+        key: {"group": group, "name": label, "value": None}
         for key, (group, label) in SOLAR_CARD.items()
     }
     if measures is None and load is None:
         return messages, status
     readings = {}
-    for key, (address, divisor, unit, kind) in {
-        **CONFIRMED_SOLAR_REGISTERS, **PROBABLE_SOLAR_REGISTERS,
-    }.items():
+    for key, (address, divisor, unit, kind) in CONFIRMED_SOLAR_REGISTERS.items():
         raw = measures[address] if measures is not None else None
         value = None if raw is None else str(raw if divisor == 1 else raw / divisor)
         readings[key] = (value, unit, kind)
@@ -192,26 +181,23 @@ def solar_payloads(hub_id, measures, load=None):
     readings["load_state"] = (load_state, None, None)
 
     for key, (value, unit, kind) in readings.items():
-        probable = key in PROBABLE_SOLAR_REGISTERS or key == "load_state"
         if key in status:
             status[key].update(value=value, unit=unit)
         label = SOLAR_CARD[key][1] if key in SOLAR_CARD else MQTT_ONLY_SOLAR_LABELS[key]
-        if key == "pv_energy_total":
-            label = "Production totale brute (CHG)"
         domain = "binary_sensor" if key == "load_state" else "sensor"
-        source_key = f"eco_worthy_{'pv_energy_total_raw' if key == 'pv_energy_total' else key}"
+        source_key = f"eco_worthy_{key}"
         uid = f"niusmart_{hub_id.lower()}_eco_worthy_{domain}_{source_key}"
         state_topic = f"niusmart/{hub_id}/solar/eco_worthy/{domain}/{source_key}/state"
         config = {
-            "name": f"{label} (probable)" if probable else label,
+            "name": label,
             "unique_id": uid, "state_topic": state_topic, "expire_after": 120,
             "device": {"identifiers": [f"niusmart_{hub_id.lower()}_eco_worthy"],
                        "name": f"{hub_id} ECO-WORTHY MPPT"},
         }
         if kind:
             config.update(device_class=kind, unit_of_measurement=unit, state_class="measurement")
-        if probable:
-            config["entity_category"] = "diagnostic"
+        if kind == "voltage":
+            config["suggested_display_precision"] = 1
         if domain == "binary_sensor":
             config.update(payload_on="ON", payload_off="OFF")
         messages.append((f"homeassistant/{domain}/{uid}/config", json.dumps(config), True))

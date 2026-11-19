@@ -263,16 +263,9 @@
         if (!groups.has(metric.group)) groups.set(metric.group, []);
         const row = element('div');
         row.className = 'line';
-        const value = metric.value == null ?
-          (metric.confidence === 'unmapped' ? 'À identifier' : 'Non disponible') :
+        const value = metric.value == null ? 'Non disponible' :
           [metric.value, metric.unit].filter(Boolean).join(' ');
-        const display = element('dd', value);
-        if (metric.value != null && metric.confidence === 'probable') {
-          const badge = element('small', 'Probable');
-          badge.className = 'badge warning';
-          display.append(' ', badge);
-        }
-        row.append(element('dt', metric.name), display);
+        row.append(element('dt', metric.name), element('dd', value));
         groups.get(metric.group).push(row);
       }
       container.replaceChildren(...Array.from(groups, ([group, rows]) => {

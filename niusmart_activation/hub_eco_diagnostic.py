@@ -7,6 +7,8 @@ import tempfile
 
 from pathlib import Path
 
+from hub_solar import REGISTER_NOTES
+
 PAYLOAD = Path("/usr/local/share/eco_worthy_sensor.py")
 BASE_HASH = Path("/usr/local/share/eco_worthy_original.sha256")
 ENTITY = "sensor.eco_worthy_registres_modbus"
@@ -87,19 +89,19 @@ def diagnostic_rows(states):
         rows = []
         for idx, row in enumerate(registers):
             block = "L01" if idx < 15 else "L02"
-            address = f"0x{idx if idx < 15 else 0x0401 + idx - 15:04X}"
+            register = idx if idx < 15 else 0x0401 + idx - 15
+            address = f"0x{register:04X}"
             value = row.get("decimale") if isinstance(row, dict) else None
             if (type(value) is not int or not 0 <= value <= 0xffff
                     or row.get("numero") != idx + 1 or row.get("adresse") != address):
                 break
-            note = row.get("repere")
             rows.append({
                 "numero": idx + 1,
                 "bloc": block,
                 "adresse": address,
                 "decimale": value,
                 "hexadecimale": f"0x{value:04X}",
-                "repere": note[:100] if isinstance(note, str) else "Non identifié",
+                "repere": REGISTER_NOTES.get(register, ""),
             })
         if len(rows) == 30:
             return rows

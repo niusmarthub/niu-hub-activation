@@ -11,6 +11,12 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
+## 0.3.21 — mesures solaires validées sur REM-0021
+
+- La carte locale affiche les mesures validées, avec leur unité.
+- La ligne 9 de L01 fournit les puissances PV et LOAD affichées en watts. La ligne 6 donne la tension LOAD. L’état LOAD provient de la ligne 30 de L02.
+- La température de la sonde est publiée comme capteur MQTT.
+
 ## 0.3.18 — tableaux solaire et climatisation REM-0021
 
 - La carte solaire affiche l’état LOAD, la température de la sonde et trois mesures dans chacun des groupes Panneau solaire, Batterie et Sortie LOAD.

@@ -68,7 +68,7 @@ class OptionalModuleTests(unittest.TestCase):
             run = lambda enabled: ha.publish_solar(self.root, "REM-0021", enabled, "solar",
                                                    self.load, self.save, measures=measures)
             prefix = "homeassistant/sensor/niusmart_rem-0021_eco_worthy_sensor_eco_worthy_"
-            retired = prefix + "trame_modbus/config"
+            retired = prefix + "pv_energy_total_raw/config"
             battery = prefix + "battery_voltage/config"
             self.ledger["solar"] = {"hub_id": "REM-0021", "topics": [retired, battery],
                                     "legacy_cleared": True}
