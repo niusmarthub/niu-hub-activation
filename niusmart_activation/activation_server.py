@@ -1040,6 +1040,32 @@ def entity_state_sync_loop():
         STOP.wait(interval)
 
 
+def can_watchdog_loop():
+    from hub_can_watchdog import check_can1
+
+    next_check = 0
+    startup_recheck = True
+    while not STOP.is_set():
+        config = load_active_config()
+        options = (config or {}).get('site_config') or {}
+        climate_count = options.get('climate_count')
+        if PENDING_FILE.exists() or type(climate_count) is not int or climate_count < 1:
+            next_check = 0
+            startup_recheck = True
+        elif time.monotonic() >= next_check:
+            try:
+                result = check_can1()
+            except Exception as exc:
+                diagnostic_error('can1_watchdog_error', exc)
+                next_check = time.monotonic() + 60
+            else:
+                diagnostic('can1_watchdog', result=result)
+                # The older Niu CAN integration can cycle the link during startup.
+                next_check = time.monotonic() + (30 if startup_recheck else 2 * 60 * 60)
+                startup_recheck = False
+        STOP.wait(FEATURE_STATE_REFRESH)
+
+
 def homeassistant_features_loop():
     from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
     from hub_solar import (direct_diagnostic_rows, legacy_measures, read_solar,
@@ -1372,6 +1398,7 @@ if __name__ == '__main__':
     Thread(target=sync_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
+    Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
     Thread(target=entity_state_sync_loop, daemon=True).start()
     Thread(target=mqtt_dependency_loop, daemon=True).start()

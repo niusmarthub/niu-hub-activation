@@ -28,6 +28,13 @@ LIMITES DE CETTE PREMIERE VERSION:
 - La cle API du site existante est envoyee au Hub apres validation du code.
 - Ne pas utiliser un code d'activation d'un site de production pour ce test.
 
+0.3.25 — surveillance de can1
+- Avec la climatisation active, contrôle can1 au démarrage puis toutes les 2 h.
+- Réactive un lien arrêté à 250 kbit/s et active la récupération automatique
+  après bus-off à 100 ms. Un lien déjà actif garde ses paramètres.
+- Vérifie à nouveau 30 s après le premier succès pour couvrir le démarrage de
+  l’intégration Niu CAN. Réessaie après 60 s si le contrôle échoue.
+
 0.3.15 — essai REM-0021
 - Ajoute l'appareil MQTT commun aux 32 entrées NDIH-432 existantes, puis recharge
   le YAML MQTT. La sauvegarde est configuration.yaml.niu-before-ndih432.
