@@ -15,11 +15,15 @@ STATE_TEMPLATE = r"""
 {%- set excluded = '_(countdown(_[0-9]+)?|child_lock|light_mode|max_set|min_set|mini_set|liquid_depth_max)$' -%}
 {%- for id in integration_entities('mqtt') | sort -%}
     {%- set identifiers = device_attr(id, 'identifiers') or [] -%}
-    {%- set managed = identifiers | selectattr('0', 'eq', 'mqtt')
-        | map(attribute='1') | select('match', '^niusmart_tuya_') | list -%}
+    {%- set mqtt_ids = identifiers | selectattr('0', 'eq', 'mqtt')
+        | map(attribute='1') | list -%}
+    {%- set managed = mqtt_ids | select('match', '^niusmart_tuya_') | list -%}
+    {%- set eco_probe = id is match('^sensor[.]')
+        and state_attr(id, 'device_class') == 'temperature'
+        and (mqtt_ids | select('match', '^niusmart_[a-z0-9_-]+_eco_worthy$') | list) -%}
     {%- set input = id is match('^binary_sensor[.]n4dih32_di(0[1-9]|[12][0-9]|3[0-2])$') -%}
     {%- set unidentified_tank_dp = id is search('_(black_tank|fresh_water)_dp_[0-9]+$') -%}
-    {%- if input or (managed and id is match('^(sensor|binary_sensor|switch)[.]')
+    {%- if input or eco_probe or (managed and id is match('^(sensor|binary_sensor|switch)[.]')
                      and id is not search(excluded) and not unidentified_tank_dp) -%}
         {%- set rows.items = rows.items + [{
             'entity_id': id,
