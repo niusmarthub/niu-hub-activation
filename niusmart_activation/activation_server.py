@@ -1066,6 +1066,36 @@ def can_watchdog_loop():
         STOP.wait(FEATURE_STATE_REFRESH)
 
 
+
+def tablet_loop():
+    """Sync tablet presentation only; activation flow remains unchanged."""
+    from hub_tablet import CARD_DIRECTORY, fetch_mappings, install_cards, publish_tablet, tablet_attributes
+
+    root = SHARED_FILE.parent.parent
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            enabled = (load_json(ADDON_OPTIONS) or {}).get('local_tablet') is True
+            if not enabled or not validate_identity_for_sync(config) or PENDING_FILE.exists():
+                if (root / CARD_DIRECTORY / 'niu-tablet.js').is_file():
+                    publish_tablet('disabled')
+            else:
+                install_cards(root)
+                mappings = fetch_mappings(config, validate_base_url(config['api_base_url']))
+                current = load_active_config()
+                if current == config and not PENDING_FILE.exists():
+                    publish_tablet('ready', tablet_attributes(root, config, mappings))
+                else:
+                    publish_tablet('unavailable')
+        except Exception as exc:
+            diagnostic_error('tablet_sync_error', exc)
+            try:
+                publish_tablet('unavailable')
+            except Exception as state_error:
+                diagnostic_error('tablet_state_error', state_error)
+        STOP.wait(60)
+
+
 def homeassistant_features_loop():
     from hub_eco_diagnostic import diagnostic_rows, install_eco_diagnostics
     from hub_solar import (direct_diagnostic_rows, legacy_measures, read_solar,
@@ -1397,6 +1427,7 @@ if __name__ == '__main__':
         except Exception as exc:
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
+    Thread(target=tablet_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
     from hub_router_traffic import polling_loop as router_traffic_loop
     Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
