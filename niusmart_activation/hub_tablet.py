@@ -50,7 +50,7 @@ def fetch_mappings(config, base_url):
             raise ValueError("Redirection du service tablette refusée")
         data = json.load(response)
     if (not isinstance(data, dict) or data.get("success") is not True
-            or data.get("site_id") != config["site_id"]
+            or str(data.get("site_id")) != str(config["site_id"])
             or data.get("device_code") != config["device_code"]
             or not isinstance(data.get("mappings"), list)):
         raise ValueError("Réponse tablette invalide")
@@ -67,7 +67,10 @@ def tablet_attributes(root, config, mappings):
     site = config.get("site_config", {})
     options = {key: site.get(key, 0) for key in OPTION_NAMES}
     registry = root / ".storage/core.entity_registry"
-    entities = json.loads(registry.read_text(encoding="utf-8"))["data"]["entities"] if registry.is_file() else []
+    try:
+        entities = json.loads(registry.read_text(encoding="utf-8"))["data"]["entities"] if registry.is_file() else []
+    except (OSError, ValueError, KeyError, TypeError):
+        entities = []
     climate, solar = {}, {}
     hub_key = config["device_code"].lower()
     for entry in entities:
