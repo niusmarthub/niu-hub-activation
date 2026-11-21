@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.3.25"
+version: "0.3.26"
 slug: "niu_activation"
 description: "Activation NiuSmart, synchronisation des options du site et protection des cles API"
 url: "https://niusmart.com"
@@ -23,8 +23,10 @@ ports:
   8099/tcp: 8099
 ports_description:
   8099/tcp: "Interface d'activation Niu Hub (reseau local uniquement)"
-options: {}
+options:
+  local_tablet: false
 schema:
+  local_tablet: bool
   solar_bluetooth_address: str?
   netbird_setup_key: password?
   netbird_repository: url?

@@ -1,8 +1,10 @@
 """Provision the local NetBird add-on through the Home Assistant Supervisor."""
 
+import ipaddress
 import json
 import os
 import re
+import subprocess
 import urllib.request
 
 
@@ -26,6 +28,24 @@ def supervisor(path, payload=None, timeout=15):
     return result.get("data") or {}
 
 
+def tunnel_ipv4():
+    """Find the host NetBird tunnel IPv4 without exposing credentials."""
+    try:
+        output = subprocess.check_output(
+            ["ip", "-j", "-4", "address", "show", "dev", "wt0"],
+            text=True, stderr=subprocess.DEVNULL, timeout=3,
+        )
+        for link in json.loads(output):
+            if "UP" not in link.get("flags", []):
+                continue
+            for address in link.get("addr_info", []):
+                if address.get("family") == "inet" and address.get("scope") == "global":
+                    return str(ipaddress.IPv4Address(address["local"]))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
+        return None
+    return None
+
+
 def provision_netbird(settings, hub_name, pending, save_pending):
     installed = [
         row for row in supervisor("/addons").get("addons", [])
@@ -42,7 +62,8 @@ def provision_netbird(settings, hub_name, pending, save_pending):
         if info.get("state") == "started":
             if pending == slug:
                 save_pending(None)
-            return "En marche · connexion au réseau à confirmer"
+            address = tunnel_ipv4()
+            return f"Tunnel actif · {address}" if address else "En marche · tunnel non détecté"
         if info.get("state") != "stopped":
             return "Démarrage de NetBird en cours"
         if pending and pending != slug:

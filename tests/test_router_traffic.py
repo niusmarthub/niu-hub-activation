@@ -1,0 +1,42 @@
+"""QX210 traffic collector regression tests (offline, no router required)."""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import hub_router_traffic as traffic
+
+
+class RouterTrafficTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.patcher = patch.object(traffic, "STATE_PATH", Path(self.tmp.name) / "usage.json")
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
+    def test_first_sample_is_baseline(self):
+        with patch.object(traffic, "read_counters", return_value=(1000, 2000)):
+            result = traffic.sample()
+        self.assertEqual((result["tracked_rx_bytes"], result["tracked_tx_bytes"]), (0, 0))
+
+    def test_deltas_survive_restart(self):
+        with patch.object(traffic, "read_counters", side_effect=[(1000, 2000), (1300, 2500)]):
+            traffic.sample()
+            result = traffic.sample()
+        self.assertEqual((result["tracked_rx_bytes"], result["tracked_tx_bytes"]), (300, 500))
+        self.assertEqual(json.loads(traffic.STATE_PATH.read_text())["totals"], {"rx": 300, "tx": 500})
+
+    def test_reset_does_not_count_fake_traffic(self):
+        with patch.object(traffic, "read_counters", side_effect=[(1000, 2000), (1300, 2500), (10, 20), (40, 50)]):
+            traffic.sample()
+            traffic.sample()
+            reset = traffic.sample()
+            result = traffic.sample()
+        self.assertTrue(reset["counter_reset"])
+        self.assertEqual((result["tracked_rx_bytes"], result["tracked_tx_bytes"]), (330, 530))
+
+
+if __name__ == "__main__":
+    unittest.main()
