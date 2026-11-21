@@ -1270,6 +1270,7 @@ def dashboard_status():
                 SITE_FLAG_FIELDS | {'toilet_count', 'door_count', 'climate_count'}
             ) if key in site},
             'netbird': NETBIRD_STATUS,
+            'internet_traffic': __import__('hub_router_traffic').current_status(),
             'solar': SOLAR_STATUS,
             'solar_diagnostics': SOLAR_DIAGNOSTICS,
             'climate': CLIMATE_STATUS,
@@ -1397,6 +1398,8 @@ if __name__ == '__main__':
             diagnostic_error('recovery_error', exc)
     Thread(target=sync_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
+    from hub_router_traffic import polling_loop as router_traffic_loop
+    Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
     Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
