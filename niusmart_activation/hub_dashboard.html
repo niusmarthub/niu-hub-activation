@@ -88,6 +88,7 @@
           <dl>
             <div class="line"><dt>Courtier MQTT</dt><dd id="mqttBroker"></dd></div>
             <div class="line"><dt>NetBird</dt><dd id="netbird"></dd></div>
+            <div class="line"><dt>Trafic routeur eth0</dt><dd id="internetTraffic">En attente</dd></div>
             <div class="line"><dt>États des modules Tuya dans MQTT</dt><dd id="tuya-mqtt"></dd></div>
             <div class="line"><dt>Mesures d’énergie MQTT</dt><dd id="mqtt"></dd></div>
           </dl>
@@ -299,6 +300,10 @@
         return row;
       }));
       node('netbird').textContent = data.netbird;
+      const traffic = data.internet_traffic || {};
+      node('internetTraffic').textContent = traffic.status === 'ok'
+        ? ((traffic.tracked_rx_bytes + traffic.tracked_tx_bytes) / 1000000000).toFixed(3) + ' Go suivis (LTE non confirmé)'
+        : 'Lecture indisponible';
       node('tuya-mqtt').textContent = data.tuya_mqtt;
       node('mqtt').textContent = data.energy_mqtt;
       const brokers = {
