@@ -5,7 +5,7 @@ COPY activation_server.py /usr/local/bin/activation_server.py
 COPY tuya_discovery.py /usr/local/bin/tuya_discovery.py
 COPY tuya_inventory.py /usr/local/bin/tuya_inventory.py
 COPY hub_netbird.py hub_modules.py hub_mqtt.py hub_solar.py hub_dashboard.html /usr/local/bin/
-COPY hub_homeassistant.py hub_eco_diagnostic.py hub_state_sync.py hub_can_watchdog.py /usr/local/bin/
+COPY hub_homeassistant.py hub_eco_diagnostic.py hub_state_sync.py hub_can_watchdog.py hub_router_traffic.py /usr/local/bin/
 COPY eco_worthy_sensor.py eco_worthy_original.sha256 /usr/local/share/
 COPY niu_can/ /usr/local/share/niu_can/
 COPY logo.png /usr/local/bin/logo.png
