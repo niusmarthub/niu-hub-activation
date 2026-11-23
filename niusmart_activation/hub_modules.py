@@ -169,7 +169,7 @@ def public_datapoints(module, values):
     return rows
 
 
-def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
+def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_states=None):
     def snapshot(module):
         device_id = module["tuya_device_id"]
         endpoint = endpoints[device_id]
@@ -180,7 +180,12 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
                 values = read_datapoints(module, endpoint)
             except Exception as exc:
                 on_read_error(exc)
+        source = "local" if values is not None else "unavailable"
+        if values is None and cloud_states and device_id in cloud_states:
+            values = cloud_states[device_id]
+            source = "tuya_cloud"
         return {
+            "source": source,
             "id": device_id, "name": module.get("device_name") or device_id,
             "product": module.get("product_name"), "product_id": module.get("product_id"),
             "ip": endpoint["ip"], "protocol": endpoint["version"],
@@ -204,7 +209,7 @@ def apply_relay_commands(feed, endpoints, modules, commands, executor, is_curren
     def apply(module):
         device_id = module["id"]
         requested = pending.get(device_id)
-        if not requested or not (module["seen"] or module.get("ip_source") == "manual") or not module["read"]:
+        if not requested or module.get("source", "local") != "local" or not (module["seen"] or module.get("ip_source") == "manual") or not module["read"]:
             return
         for dp in module["datapoints"]:
             request = requested.get(dp["id"])
@@ -259,7 +264,7 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
             topic_base = f"niusmart/{hub_id}/tuya/{device_id}/{dp_id}"
             state_topic = f"{topic_base}/state"
             device = {"identifiers": [f"niusmart_tuya_{device_id}"], "name": module["name"]}
-            if dp["relay_candidate"] and (module["seen"] or (device_id, dp_id) in tracked_switches):
+            if dp["relay_candidate"] and (module["source"] == "local" and module["seen"] or (device_id, dp_id) in tracked_switches):
                 active_switches.add((device_id, dp_id))
                 config = {
                     "name": relay_names[dp_id], "unique_id": unique_id, "state_topic": state_topic,
