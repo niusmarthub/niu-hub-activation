@@ -195,6 +195,27 @@
         if (hasSwitch) heading.append(badge('Commande MQTT', 'switch'));
         else if (hasSensor) heading.append(badge('Lecture seule', 'sensor'));
         entry.append(heading);
+        if (!module.seen) {
+          const form = element('form');
+          const field = element('input');
+          field.type = 'text'; field.placeholder = 'IP manuelle (ex. 192.168.1.125)';
+          field.value = module.manual_ip || ''; field.setAttribute('aria-label', 'Adresse IP de secours');
+          const save = element('button', 'Enregistrer IP'); save.type = 'submit';
+          const feedback = element('small', ''); feedback.setAttribute('role', 'status');
+          form.append(field, save, feedback);
+          form.addEventListener('submit', async event => {
+            event.preventDefault(); save.disabled = true;
+            try {
+              const response = await fetch('/tuya/manual-ip', {
+                method: 'POST', headers: {'Content-Type': 'application/json', 'X-Niu-Hub-Request': 'manual-ip'},
+                body: JSON.stringify({device_id: module.id, ip: field.value.trim()})
+              });
+              const result = await response.json(); feedback.textContent = result.message;
+            } catch { feedback.textContent = 'Enregistrement impossible.'; }
+            finally { save.disabled = false; }
+          });
+          entry.append(form);
+        }
         const description = [module.product, module.product_id, module.protocol].filter(Boolean).join(' · ');
         if (description) {
           const metadata = element('small', description);
