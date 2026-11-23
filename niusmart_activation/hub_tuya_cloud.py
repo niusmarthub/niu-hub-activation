@@ -6,7 +6,6 @@ The bridge does not send cloud commands or change Home Assistant configuration.
 import os
 import re
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 import websocket
 
@@ -31,8 +30,9 @@ def _ws_request(commands):
         http_proxy_host=None,
     )
     try:
-        if ws.recv() and False:
-            pass
+        greeting = __import__("json").loads(ws.recv())
+        if greeting.get("type") != "auth_required":
+            return None
         ws.send(__import__("json").dumps({"type": "auth", "access_token": token}))
         if __import__("json").loads(ws.recv()).get("type") != "auth_ok":
             return None
@@ -105,7 +105,7 @@ def read_cloud_states(feed):
         for dp in module.get("datapoints") or []:
             code = str(dp.get("status_code") or "").lower()
             dp_id = str(dp.get("dp_id") or "")
-            if not code or not dp_id.isdigit() or re.fullmatch(r"(?:switch|relay)(?:_\\d+)?", code):
+            if not code or not dp_id.isdigit() or re.fullmatch(r"(?:switch|relay)(?:_\d+)?", code):
                 continue
             aliases = ALIAS.get(code, ())
             if uid.endswith(code) or any(uid.endswith(alias) for alias in aliases):
