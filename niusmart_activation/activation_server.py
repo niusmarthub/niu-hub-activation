@@ -1359,7 +1359,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(409, {'success': False, 'message': 'Hub non activé.'})
             try:
                 from hub_router_traffic import read_dhcp_leases
-                return self.send_json(200, {'success': True, 'ips': read_dhcp_leases()})
+                leases = read_dhcp_leases(detailed=True)
+                confirmed = {
+                    row['ip'] for row in MODULE_STATUS.get('modules', [])
+                    if row.get('seen') and row.get('read') and row.get('ip')
+                }
+                return self.send_json(200, {'success': True, 'leases': [
+                    lease for lease in leases if lease['ip'] not in confirmed
+                ]})
             except Exception as exc:
                 diagnostic_error('tuya_dhcp_list_error', exc)
                 return self.send_json(503, {'success': False, 'message': 'Lecture DHCP indisponible.'})
@@ -1395,6 +1402,12 @@ class Handler(BaseHTTPRequestHandler):
                     if not address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
                         raise ValueError('Adresse IP locale invalide')
                     ip = str(address)
+                    if any(
+                        row.get('id') != device_id and row.get('ip') == ip
+                        and row.get('seen') and row.get('read')
+                        for row in MODULE_STATUS.get('modules', [])
+                    ):
+                        return self.send_json(409, {'success': False, 'result': 'already_assigned', 'message': 'IP déjà confirmée pour un autre module.'})
                     from tuya_discovery import verify_manual_ip
                     verdict = verify_manual_ip(device_id, ip, feed['modules'])
                     if verdict == 'incorrect':
