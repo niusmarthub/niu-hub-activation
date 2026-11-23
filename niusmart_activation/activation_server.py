@@ -1354,6 +1354,15 @@ class Handler(BaseHTTPRequestHandler):
             content_type = 'image/png'
         elif self.path == '/status':
             return self.send_json(200, dashboard_status())
+        elif self.path == '/tuya/dhcp-leases':
+            if not validate_identity_for_sync(load_active_config()) or PENDING_FILE.exists():
+                return self.send_json(409, {'success': False, 'message': 'Hub non activé.'})
+            try:
+                from hub_router_traffic import read_dhcp_leases
+                return self.send_json(200, {'success': True, 'ips': read_dhcp_leases()})
+            except Exception as exc:
+                diagnostic_error('tuya_dhcp_list_error', exc)
+                return self.send_json(503, {'success': False, 'message': 'Lecture DHCP indisponible.'})
         else:
             return self.send_json(404, {'success':False,'message':'Page introuvable'})
         self.send_response(200)
