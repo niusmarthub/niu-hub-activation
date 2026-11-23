@@ -1395,6 +1395,12 @@ class Handler(BaseHTTPRequestHandler):
                     if not address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
                         raise ValueError('Adresse IP locale invalide')
                     ip = str(address)
+                    from tuya_discovery import verify_manual_ip
+                    verdict = verify_manual_ip(device_id, ip, feed['modules'])
+                    if verdict == 'incorrect':
+                        return self.send_json(409, {'success': False, 'result': 'incorrect', 'message': 'Module incorrect : identité différente.'})
+                    if verdict != 'confirmed':
+                        return self.send_json(409, {'success': False, 'result': 'no_response', 'message': 'Module ne répond pas ou identité non vérifiable.'})
                 with LOCK:
                     stored = load_json(TUYA_MANUAL_IP_FILE) or {}
                     ips = stored.get('ips', {}) if stored.get('hub_id') == feed['hub_id'] else {}
