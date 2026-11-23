@@ -17,7 +17,6 @@ privileged:
 host_dbus: true
 arch:
   - aarch64
-  - armv7
   - amd64
 ports:
   8099/tcp: 8099
