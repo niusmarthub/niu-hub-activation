@@ -179,9 +179,29 @@
       return true;
     }
 
+    let dhcpLeasesPromise = null;
+    const manualFormState = new Map();
+    function getDhcpLeases() {
+      if (!dhcpLeasesPromise) {
+        dhcpLeasesPromise = fetch('/tuya/dhcp-leases', {cache: 'no-store'})
+          .then(response => { if (!response.ok) throw new Error('DHCP indisponible'); return response.json(); })
+          .then(data => data.leases || [])
+          .catch(error => { dhcpLeasesPromise = null; throw error; });
+      }
+      return dhcpLeasesPromise;
+    }
+
     function renderModules(modules) {
       const container = node('modules');
       const expanded = new Set([...container.querySelectorAll('details[open]')].map(item => item.dataset.id));
+      for (const form of container.querySelectorAll('form[data-device-id]')) {
+        manualFormState.set(form.dataset.deviceId, {
+          ip: form.querySelector('input')?.value || '',
+          selected: form.querySelector('select')?.value || '',
+          feedback: form.querySelector('[role=status]')?.textContent || '',
+          color: form.querySelector('[role=status]')?.style.color || '',
+        });
+      }
       container.replaceChildren();
       for (const module of modules) {
         const entry = element('details');
@@ -202,20 +222,22 @@
         if (!module.seen) {
           const form = element('form');
           form.className = 'tuya-ip-form';
+          form.dataset.deviceId = module.id;
+          const savedState = manualFormState.get(module.id);
           const field = element('input');
           field.type = 'text'; field.placeholder = 'IP manuelle (ex. 192.168.1.125)';
-          field.value = module.manual_ip || ''; field.setAttribute('aria-label', 'Adresse IP de secours');
+          field.value = savedState?.ip ?? module.manual_ip ?? ''; field.setAttribute('aria-label', 'Adresse IP de secours');
           const save = element('button', 'Enregistrer IP'); save.type = 'submit';
           const feedback = element('small', ''); feedback.setAttribute('role', 'status');
           feedback.className = 'tuya-ip-feedback';
+          feedback.textContent = savedState?.feedback || '';
+          feedback.style.color = savedState?.color || '';
           const choices = element('select');
           choices.setAttribute('aria-label', 'IP détectées par le routeur');
           choices.append(element('option', 'Choisir une IP du routeur'));
           choices.firstChild.textContent = 'Chargement des IP du routeur…';
-          fetch('/tuya/dhcp-leases', {cache: 'no-store'})
-            .then(response => { if (!response.ok) throw new Error('DHCP indisponible'); return response.json(); })
-            .then(data => {
-              const leases = data.leases || [];
+          getDhcpLeases()
+            .then(leases => {
               choices.replaceChildren();
               const placeholder = element('option', leases.length ? 'Choisir un appareil du routeur' : 'Aucune IP disponible');
               placeholder.value = '';
@@ -226,6 +248,7 @@
                 option.value = lease.ip;
                 choices.append(option);
               }
+              if (savedState?.selected) choices.value = savedState.selected;
             })
             .catch(() => { choices.firstChild.textContent = 'Liste DHCP indisponible'; });
           choices.addEventListener('change', () => { if (choices.value) field.value = choices.value; });
