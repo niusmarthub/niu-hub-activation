@@ -92,6 +92,7 @@ SOLAR_WEB_INTERVAL = 30
 TUYA_DISCOVERY_ENABLED = os.environ.get('NIU_TUYA_DISCOVERY', '1') == '1'
 TUYA_SCAN_INTERVAL = max(120, int(os.environ.get('NIU_TUYA_SCAN_INTERVAL', '300')))
 TUYA_INVENTORY_FILE = DATA_DIR / 'tuya_inventory.json'
+TUYA_MANUAL_IP_FILE = DATA_DIR / 'tuya_manual_ips.json'
 TUYA_SWITCHES_FILE = DATA_DIR / 'tuya_mqtt_switches.json'
 TUYA_MODULE_ORDER_FILE = DATA_DIR / 'tuya_module_order.json'
 TUYA_ACTIVE_ATTEMPT_FILE = DATA_DIR / 'tuya_active_attempt.json'
@@ -743,7 +744,9 @@ def update_tuya_inventory(feed, scan):
     discovered = scan['devices']
     previous = load_json(TUYA_INVENTORY_FILE)
     known = previous.get('modules') if isinstance(previous, dict) and previous.get('hub_id') == feed['hub_id'] else None
-    modules = reconcile_modules(feed, discovered, known)
+    manual_record = load_json(TUYA_MANUAL_IP_FILE) or {}
+    manual = manual_record.get('ips', {}) if manual_record.get('hub_id') == feed['hub_id'] else {}
+    modules = reconcile_modules(feed, discovered, known, manual)
     key_counts = Counter(row['local_key'] for row in feed['modules'] if is_nonblank(row.get('local_key')))
     missing = [
         {'id': row['tuya_device_id'], 'key': row['local_key'], 'ip': modules[row['tuya_device_id']]['ip']}
@@ -764,7 +767,7 @@ def update_tuya_inventory(feed, scan):
                 if targets:
                     write_json_atomic(TUYA_ACTIVE_ATTEMPT_FILE, {'at': now})
                     discovered.update(discover_missing(missing, targets))
-                    modules = reconcile_modules(feed, discovered, known)
+                    modules = reconcile_modules(feed, discovered, known, manual)
                 else:
                     note = 'Le réseau local des modules manquants n’a pas pu être confirmé.'
         except Exception as exc:
@@ -1346,6 +1349,43 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_POST(self):
+        if self.path == '/tuya/manual-ip':
+            if self.headers.get('X-Niu-Hub-Request') != 'manual-ip':
+                return self.send_json(403, {'success': False, 'message': 'Requête locale invalide.'})
+            config = load_active_config()
+            if not validate_identity_for_sync(config) or PENDING_FILE.exists():
+                return self.send_json(409, {'success': False, 'message': 'Hub non activé.'})
+            try:
+                from ipaddress import IPv4Address
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 1 <= length <= 512:
+                    raise ValueError('Taille invalide')
+                body = json.loads(self.rfile.read(length))
+                device_id, ip = body['device_id'], body['ip'].strip()
+                feed = fetch_tuya_inventory()
+                if not any(m.get('tuya_device_id') == device_id for m in feed['modules']):
+                    raise ValueError('Module non autorisé')
+                if ip:
+                    address = IPv4Address(ip)
+                    if not address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+                        raise ValueError('Adresse IP locale invalide')
+                    ip = str(address)
+                with LOCK:
+                    stored = load_json(TUYA_MANUAL_IP_FILE) or {}
+                    ips = stored.get('ips', {}) if stored.get('hub_id') == feed['hub_id'] else {}
+                    ips = dict(ips)
+                    if ip:
+                        ips[device_id] = ip
+                    else:
+                        ips.pop(device_id, None)
+                    write_json_atomic(TUYA_MANUAL_IP_FILE, {'hub_id': feed['hub_id'], 'ips': ips})
+                request_discovery()
+                return self.send_json(200, {'success': True, 'message': 'Adresse de secours enregistrée. Redécouverte demandée.'})
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                return self.send_json(400, {'success': False, 'message': str(exc)})
+            except Exception as exc:
+                diagnostic_error('tuya_manual_ip_error', exc)
+                return self.send_json(503, {'success': False, 'message': 'Impossible de sauvegarder cette adresse.'})
         if self.path == '/rediscover':
             if self.headers.get('X-Niu-Hub-Request') != 'rediscover':
                 return self.send_json(403, {'success': False, 'message': 'Requête locale invalide.'})
