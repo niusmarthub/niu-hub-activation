@@ -764,12 +764,28 @@ def update_tuya_inventory(feed, scan):
             else:
                 anchor_ips = [item['ip'] for item in modules.values() if item['discovered']]
                 targets = active_scan_targets({entry['ip'] for entry in discovered.values()}, anchor_ips)
+                # Prefer the router's actual DHCP leases over a full-subnet scan.
+                # Do not probe the router itself or already discovered endpoints.
+                try:
+                    from hub_router_traffic import read_dhcp_leases
+                    from ipaddress import IPv4Address, IPv4Network
+                    router_ips = read_dhcp_leases()
+                    network = IPv4Network('192.168.1.0/24')
+                    seen_ips = {entry['ip'] for entry in discovered.values()}
+                    dhcp_targets = [
+                        f'{ip}/32' for ip in router_ips
+                        if IPv4Address(ip) in network and ip not in seen_ips
+                    ]
+                    if dhcp_targets:
+                        targets = dhcp_targets
+                except Exception as exc:
+                    diagnostic_error('tuya_dhcp_discovery_error', exc)
                 if targets:
                     write_json_atomic(TUYA_ACTIVE_ATTEMPT_FILE, {'at': now})
                     discovered.update(discover_missing(missing, targets))
                     modules = reconcile_modules(feed, discovered, known, manual)
                 else:
-                    note = 'Le réseau local des modules manquants n’a pas pu être confirmé.'
+                    note = 'Aucune adresse locale admissible pour la découverte active.'
         except Exception as exc:
             diagnostic_error('tuya_active_discovery_error', exc)
             note = 'Le balayage actif a rencontré une erreur. Consultez le journal de l’application.'
