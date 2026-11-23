@@ -53,7 +53,7 @@ def read_counters():
 
 
 
-def read_dhcp_leases():
+def read_dhcp_leases(*, detailed=False):
     """Read QX210 DHCP IPv4 leases using the same authenticated LuCI session."""
     from ipaddress import IPv4Address, IPv4Network
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -72,7 +72,7 @@ def read_dhcp_leases():
     if not isinstance(leases, list):
         raise ValueError("Router DHCP lease list unavailable")
     lan = IPv4Network("192.168.1.0/24")
-    addresses = set()
+    addresses = {}
     for lease in leases:
         if not isinstance(lease, dict):
             continue
@@ -81,8 +81,10 @@ def read_dhcp_leases():
         except (ValueError, TypeError):
             continue
         if address in lan and address != lan.network_address and address != lan.broadcast_address:
-            addresses.add(str(address))
-    return sorted(addresses, key=lambda ip: int(IPv4Address(ip)))
+            ip = str(address)
+            addresses[ip] = {'ip': ip, 'name': str(lease.get('hostname') or '').strip()[:100], 'mac': str(lease.get('macaddr') or '').strip()[:32]}
+    ordered = sorted(addresses, key=lambda ip: int(IPv4Address(ip)))
+    return [addresses[ip] for ip in ordered] if detailed else ordered
 
 
 def _save_atomic(state):
