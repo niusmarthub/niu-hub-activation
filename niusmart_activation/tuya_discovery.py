@@ -62,6 +62,38 @@ def discover_missing(modules, targets):
     }
 
 
+
+def verify_manual_ip(device_id, ip, modules):
+    """Read-only identity check; never send commands to candidate devices."""
+    from ipaddress import IPv4Address, IPv4Network
+    address = IPv4Address(ip)
+    if address not in IPv4Network("192.168.1.0/24"):
+        raise ValueError("Adresse hors du réseau local autorisé")
+    expected = next((m for m in modules if m.get("tuya_device_id") == device_id), None)
+    if expected is None:
+        raise ValueError("Module non autorisé")
+    candidates = [
+        {"id": m["tuya_device_id"], "key": m["local_key"], "ip": str(address)}
+        for m in modules
+        if isinstance(m.get("tuya_device_id"), str) and isinstance(m.get("local_key"), str)
+        and m["local_key"]
+    ]
+    if not candidates:
+        return "no_response"
+    try:
+        raw = scan_devices(
+            discover=False, poll=False, color=False, forcescan=[str(address) + "/32"],
+            wantids=[m["id"] for m in candidates], tuyadevices=candidates,
+        )
+    except Exception:
+        return "no_response"
+    found = scan_results(raw)
+    if device_id in found and found[device_id]["ip"] == str(address):
+        return "confirmed"
+    if any(info["ip"] == str(address) for info in found.values()):
+        return "incorrect"
+    return "no_response"
+
 def discover_once(data_dir="/data"):
     """Return number of discovered devices; never log device IDs or keys."""
     found = scan_results(tinytuya.deviceScan())
