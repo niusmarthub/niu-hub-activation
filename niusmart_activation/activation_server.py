@@ -806,8 +806,14 @@ def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, 
                  and (feed['site_id'], feed['hub_id']) == (config['site_id'], config['device_code']))
     if not activated:
         return
+    try:
+        from hub_tuya_cloud import read_cloud_states
+        cloud_states = read_cloud_states(feed)
+    except Exception as exc:
+        diagnostic_error('tuya_cloud_read_error', exc)
+        cloud_states = {}
     modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc),
-                               executor=executor)
+                               executor=executor, cloud_states=cloud_states)
     if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
         return
     if listener:
