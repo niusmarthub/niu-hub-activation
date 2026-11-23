@@ -52,6 +52,39 @@ def read_counters():
     return rx, tx
 
 
+
+def read_dhcp_leases():
+    """Read QX210 DHCP IPv4 leases using the same authenticated LuCI session."""
+    from ipaddress import IPv4Address, IPv4Network
+    cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    host = str(cfg["host"]).strip()
+    IPv4Address(host)
+    username, password = cfg["username"], cfg["password"]
+    if not isinstance(username, str) or not isinstance(password, str) or not username or not password:
+        raise ValueError("Missing router credentials")
+    base = "http://" + host + "/cgi-bin/luci/"
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    payload = urllib.parse.urlencode({"luci_username": username, "luci_password": password}).encode()
+    _request(opener, base, payload)
+    raw = _request(opener, base + "admin/status/overview?status=1")
+    response = json.loads(raw)
+    leases = response.get("leases") if isinstance(response, dict) else None
+    if not isinstance(leases, list):
+        raise ValueError("Router DHCP lease list unavailable")
+    lan = IPv4Network("192.168.1.0/24")
+    addresses = set()
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        try:
+            address = IPv4Address(lease.get("ipaddr", ""))
+        except (ValueError, TypeError):
+            continue
+        if address in lan and address != lan.network_address and address != lan.broadcast_address:
+            addresses.add(str(address))
+    return sorted(addresses, key=lambda ip: int(IPv4Address(ip)))
+
+
 def _save_atomic(state):
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_PATH.with_suffix(".tmp")
