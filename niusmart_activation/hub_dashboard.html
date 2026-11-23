@@ -225,7 +225,10 @@
                 method: 'POST', headers: {'Content-Type': 'application/json', 'X-Niu-Hub-Request': 'manual-ip'},
                 body: JSON.stringify({device_id: module.id, ip: field.value.trim()})
               });
-              const result = await response.json(); feedback.textContent = result.message;
+              const result = await response.json();
+              feedback.textContent = result.message;
+              feedback.style.color = response.ok ? 'var(--success, #22863a)' : 'var(--danger, #b42318)';
+              if (response.ok) { field.value = field.value.trim(); }
             } catch { feedback.textContent = 'Enregistrement impossible.'; }
             finally { save.disabled = false; }
           });
