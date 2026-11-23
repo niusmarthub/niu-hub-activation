@@ -1,6 +1,8 @@
 FROM python:3.12-alpine
-RUN apk add --no-cache python3 ca-certificates iproute2 \
-    && pip install --no-cache-dir websocket-client==1.8.0 tinytuya==1.21.1 paho-mqtt==2.1.0 PyYAML==6.0.2 bleak==1.1.1
+RUN apk add --no-cache ca-certificates iproute2 \
+    && apk add --no-cache --virtual .build-deps build-base libffi-dev python3-dev \
+    && pip install --no-cache-dir websocket-client==1.8.0 tinytuya==1.21.1 paho-mqtt==2.1.0 PyYAML==6.0.2 bleak==1.1.1 \
+    && apk del .build-deps
 COPY activation_server.py /usr/local/bin/activation_server.py
 COPY tuya_discovery.py /usr/local/bin/tuya_discovery.py
 COPY tuya_inventory.py /usr/local/bin/tuya_inventory.py
