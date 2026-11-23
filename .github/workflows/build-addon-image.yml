@@ -25,7 +25,8 @@ jobs:
           import pathlib, yaml
           cfg = yaml.safe_load(pathlib.Path("niusmart_activation/config.yaml").read_text())
           assert cfg["version"] == "0.4.1", "Version mismatch"
-          assert "aarch64" in cfg["arch"]
+          assert cfg["arch"] == ["aarch64", "amd64"]
+          assert cfg["image"] == "ghcr.io/niusmarthub/niu-hub-activation"
           PY
       - name: Verify Dockerfile build context
         run: |
@@ -50,3 +51,36 @@ jobs:
           push: true
           tags: ghcr.io/niusmarthub/niu-hub-activation:0.4.1
           provenance: false
+
+  verify-public-image:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify anonymous pull and both architectures
+        run: |
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          base = "https://ghcr.io"
+          image = "niusmarthub/niu-hub-activation"
+          tag = "0.4.1"
+          token_url = base + "/token?scope=repository:" + image + ":pull&service=ghcr.io"
+          with urllib.request.urlopen(token_url, timeout=30) as response:
+              token = json.load(response)["token"]
+          request = urllib.request.Request(
+              base + "/v2/" + image + "/manifests/" + tag,
+              headers={
+                  "Authorization": "Bearer " + token,
+                  "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json",
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              manifest = json.load(response)
+          architectures = {
+              (item["platform"]["os"], item["platform"]["architecture"])
+              for item in manifest.get("manifests", [])
+          }
+          required = {("linux", "arm64"), ("linux", "amd64")}
+          assert required <= architectures, f"Missing image architectures: {required - architectures}"
+          print("Public anonymous pull verified:", sorted(architectures))
+          PY
