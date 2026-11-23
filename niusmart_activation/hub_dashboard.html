@@ -202,7 +202,22 @@
           field.value = module.manual_ip || ''; field.setAttribute('aria-label', 'Adresse IP de secours');
           const save = element('button', 'Enregistrer IP'); save.type = 'submit';
           const feedback = element('small', ''); feedback.setAttribute('role', 'status');
-          form.append(field, save, feedback);
+          const choices = element('select');
+          choices.setAttribute('aria-label', 'IP détectées par le routeur');
+          choices.append(element('option', 'Choisir une IP du routeur'));
+          fetch('/tuya/dhcp-leases', {cache: 'no-store'})
+            .then(response => { if (!response.ok) throw new Error('DHCP indisponible'); return response.json(); })
+            .then(data => {
+              for (const ip of (data.ips || [])) {
+                const option = element('option', ip);
+                option.value = ip;
+                choices.append(option);
+              }
+              if (!data.ips?.length) choices.firstChild.textContent = 'Aucune IP DHCP';
+            })
+            .catch(() => { choices.firstChild.textContent = 'Liste DHCP indisponible'; });
+          choices.addEventListener('change', () => { if (choices.value) field.value = choices.value; });
+          form.append(choices, field, save, feedback);
           form.addEventListener('submit', async event => {
             event.preventDefault(); save.disabled = true;
             try {
