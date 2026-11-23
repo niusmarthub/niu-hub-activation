@@ -93,7 +93,7 @@ def set_confirmed_relay(module, endpoint, dp_id, desired):
     """Apply an explicit state to a relay already mapped to this module and DP."""
     if type(desired) is not bool or not isinstance(dp_id, str) or not DP_ID.fullmatch(dp_id):
         raise ValueError("Commande relais invalide")
-    if not endpoint.get("discovered"):
+    if not endpoint.get("discovered") and endpoint.get("ip_source") != "manual":
         raise RuntimeError("Module relais non détecté")
     device = local_device(module, endpoint)
     if device is None:
@@ -175,7 +175,7 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
         endpoint = endpoints[device_id]
         values = None
         # An old address may now belong to another device. Use a current discovery.
-        if endpoint["discovered"]:
+        if endpoint["discovered"] or endpoint.get("ip_source") == "manual":
             try:
                 values = read_datapoints(module, endpoint)
             except Exception as exc:
@@ -185,6 +185,7 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None):
             "product": module.get("product_name"), "product_id": module.get("product_id"),
             "ip": endpoint["ip"], "protocol": endpoint["version"],
             "seen": endpoint["discovered"], "read": values is not None,
+            "manual_ip": endpoint.get("manual_ip"), "ip_source": endpoint.get("ip_source"),
             "datapoints": public_datapoints(module, values),
         }
 
@@ -203,7 +204,7 @@ def apply_relay_commands(feed, endpoints, modules, commands, executor, is_curren
     def apply(module):
         device_id = module["id"]
         requested = pending.get(device_id)
-        if not requested or not module["seen"] or not module["read"]:
+        if not requested or not (module["seen"] or module.get("ip_source") == "manual") or not module["read"]:
             return
         for dp in module["datapoints"]:
             request = requested.get(dp["id"])
