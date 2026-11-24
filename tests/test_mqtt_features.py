@@ -11,18 +11,20 @@ from test_mqtt_relays import hub, module
 
 
 class MqttFeaturesTests(unittest.TestCase):
-    def test_cached_climate_readings_keep_publishing_without_enabling_relays(self):
+    def test_cached_sensor_readings_keep_publishing_without_enabling_relays(self):
         tank = module("tank", [
             {"dp_id": 1, "status_code": "va_temperature"},
             {"dp_id": 2, "status_code": "humidity_value"},
             {"dp_id": 4, "status_code": "battery_percentage"},
-            {"dp_id": 10, "status_code": "maxtemp_set"},
+            {"dp_id": 10, "status_code": "liquid_depth"},
             {"dp_id": 20, "status_code": "switch_1"},
-        ], {"1": 19, "4": 0, "10": 35, "20": True})
+            {"dp_id": 21, "status_code": "switch_2"},
+        ], {"1": 19, "4": 0, "10": 35, "20": True, "21": False})
         tank.update(source="cache", seen=False, read=False)
         expected = {
             "niusmart/REM-0021/tuya/tank/1/state": "19",
             "niusmart/REM-0021/tuya/tank/4/state": "0",
+            "niusmart/REM-0021/tuya/tank/10/state": "35",
         }
         sent = {}
         with patch.object(hub, "mqtt_service"), patch.object(hub, "publish_samples") as publish:
@@ -41,6 +43,27 @@ class MqttFeaturesTests(unittest.TestCase):
             self.assertEqual(messages["niusmart/REM-0021/tuya/tank/20/availability"], "offline")
         self.assertEqual(tank["datapoints"][0]["mqtt_mode"], "sensor")
         self.assertNotIn("mqtt_mode", tank["datapoints"][1])
+
+    def test_cached_energy_readings_follow_the_monitoring_option(self):
+        meter = {
+            "id": "meter", "name": "Meter", "product_id": hub.ENERGY_PRODUCT,
+            "source": "cache", "seen": False, "read": False,
+            "datapoints": hub.public_datapoints(
+                {"product_id": hub.ENERGY_PRODUCT}, {"101": 120, "102": "FORWARD", "116": 1234},
+            ),
+        }
+        with patch.object(hub, "mqtt_service"), patch.object(hub, "publish_samples") as publish:
+            disabled = hub.publish_module_states("REM-0021", [meter], 90, energy_enabled=False)
+            enabled = hub.publish_module_states("REM-0021", [meter], 90, energy_enabled=True)
+
+        self.assertEqual(disabled["energy"], 0)
+        self.assertEqual(enabled["energy"], 2)
+        states = {topic: payload for topic, payload, retained in publish.call_args.args[1]
+                  if not retained and topic.endswith("/state")}
+        self.assertEqual(states, {
+            "niusmart/REM-0021/tuya/meter/101/state": "12.0",
+            "niusmart/REM-0021/tuya/meter/102/state": "FORWARD",
+        })
 
     def test_two_modules_numbered_without_changing_command_topics(self):
         channels = [{"dp_id": i + 10, "status_code": f"switch_{i}"} for i in range(1, 7)]
