@@ -1,6 +1,8 @@
-"""Persistent FIFO for the pilot hub batch endpoint; not yet wired to workers."""
+"""Persistent FIFO for the multisite hub batch endpoint."""
 import json
 import sqlite3
+import shutil
+import time
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -15,6 +17,7 @@ class EventQueue:
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 identity TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE,
                 event_at INTEGER NOT NULL, payload TEXT NOT NULL)""")
+            db.execute("CREATE TABLE IF NOT EXISTS sync_status (identity TEXT PRIMARY KEY, last_success INTEGER NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_identity_seq ON events(identity,seq)")
 
     def connect(self):
@@ -38,6 +41,13 @@ class EventQueue:
             db.execute("INSERT INTO events(identity,event_id,event_at,payload) VALUES(?,?,?,?)",
                        (self.identity(config), event["event_id"], event["event_at"], payload))
         return event["event_id"]
+
+    def status(self, config):
+        with closing(self.connect()) as db:
+            count, oldest = db.execute("SELECT COUNT(*), MIN(event_at) FROM events WHERE identity=?", (self.identity(config),)).fetchone()
+            row = db.execute("SELECT last_success FROM sync_status WHERE identity=?", (self.identity(config),)).fetchone()
+        disk = shutil.disk_usage(self.path.parent)
+        return {"pending_events": count, "oldest_event_at": oldest, "last_success": row[0] if row else None, "disk_free_bytes": disk.free, "disk_used_percent": round(100 * disk.used / disk.total, 2), "queue_bytes": sum(p.stat().st_size for p in self.path.parent.glob(self.path.name + "*") if p.is_file())}
 
     def pending(self, config):
         with closing(self.connect()) as db:
@@ -76,4 +86,5 @@ class EventQueue:
         with closing(self.connect()) as db, db:
             db.executemany("DELETE FROM events WHERE identity=? AND event_id=?",
                            [(self.identity(config), event_id) for event_id in expected])
+            db.execute("INSERT INTO sync_status(identity,last_success) VALUES(?,?) ON CONFLICT(identity) DO UPDATE SET last_success=excluded.last_success", (self.identity(config), int(time.time())))
         return len(expected)
