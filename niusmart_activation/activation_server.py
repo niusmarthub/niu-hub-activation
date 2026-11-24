@@ -1010,6 +1010,40 @@ def send_solar_web_sample(config, sample):
         raise RuntimeError('Synchronisation solaire refusée')
 
 
+def cellular_web_sync_loop():
+    from hub_router_traffic import current_status
+
+    sent = None
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            sample = current_status()
+            if (validate_identity_for_sync(config) and not PENDING_FILE.exists()
+                    and sample.get('status') == 'ok'
+                    and sample.get('interface') == 'eth0'
+                    and 0 <= time.time() - sample['sampled_at'] <= 600):
+                identity = (config['site_id'], config['hub_identifier'],
+                            config['api_base_url'], config['api_key'], sample['sampled_at'])
+                if identity != sent:
+                    payload = {field: sample[field] for field in
+                               ('interface', 'sampled_at', 'tracked_rx_bytes', 'tracked_tx_bytes')}
+                    request = urllib.request.Request(
+                        validate_base_url(config['api_base_url']) + '/hub_cellular_usage_api.php',
+                        data=json.dumps(payload, allow_nan=False).encode('utf-8'),
+                        headers={'Accept': 'application/json', 'Content-Type': 'application/json'},
+                        method='POST',
+                    )
+                    request.add_unredirected_header('X-API-Key', config['api_key'])
+                    with urllib.request.urlopen(request, timeout=8, context=ssl.create_default_context()) as response:
+                        reply = json.load(response)
+                    if not isinstance(reply, dict) or reply.get('success') is not True:
+                        raise RuntimeError('Cellular usage synchronization rejected')
+                    sent = identity
+        except Exception as exc:
+            diagnostic_error('cellular_web_sync_error', exc)
+        STOP.wait(15)
+
+
 def solar_web_sync_loop():
     sent = None
     interval = SOLAR_WEB_INTERVAL
@@ -1521,6 +1555,7 @@ if __name__ == '__main__':
     Thread(target=netbird_loop, daemon=True).start()
     from hub_router_traffic import polling_loop as router_traffic_loop
     Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
+    Thread(target=cellular_web_sync_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
     Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
