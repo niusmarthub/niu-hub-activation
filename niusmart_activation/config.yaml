@@ -27,8 +27,10 @@ ports_description:
   8099/tcp: "Interface d'activation Niu Hub (reseau local uniquement)"
 options:
   local_tablet: false
+  bms_sync: false
 schema:
   local_tablet: bool
+  bms_sync: bool
   solar_bluetooth_address: str?
   netbird_setup_key: password?
   netbird_repository: url?

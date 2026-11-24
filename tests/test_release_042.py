@@ -4,9 +4,30 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
+from hub_bms import battery_readings
 from hub_event_queue import EventQueue
 import hub_modules
 from test_activation import CONFIG, HUB_ID, SITE, hub
+
+
+class BatteryReadingTests(unittest.TestCase):
+    def test_cell_values_and_mode_remain_bound_to_each_battery(self):
+        devices = ('a' * 32, 'b' * 32, 'c' * 32, 'd' * 32)
+        rows = []
+        for number, (device, current) in enumerate(zip(devices, ('-2.88', '3.1', '0.05', 'unavailable')), 1):
+            suffix = '' if number == 1 else f'_{number}'
+            for sensor, state in (('batterie', '53'), ('courant', current), ('delta_cell_voltage', '0.001')):
+                rows.append({
+                    'device_id': device, 'entity_id': f'sensor.dp04s007l4s100a_{sensor}{suffix}',
+                    'state': state, 'cells': [3.274, 3.275, None, 3.273] if sensor == 'delta_cell_voltage' else None,
+                })
+
+        measurements = {entity: (value, label) for entity, value, label in battery_readings(rows)}
+        for number, (device, mode) in enumerate(zip(devices, ('discharging', 'charging', 'standby', 'unavailable')), 1):
+            prefix = f'sensor.niu_bms_{device}_'
+            self.assertEqual(measurements[prefix + 'mode'][0], mode)
+            self.assertEqual(measurements[prefix + 'cell_2'], ('3.275', f'Batterie BMS {number} · Cellule 2 (V)'))
+            self.assertEqual(measurements[prefix + 'cell_3'][0], 'unavailable')
 
 
 class BatchTests(unittest.TestCase):

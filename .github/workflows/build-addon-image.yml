@@ -39,7 +39,9 @@ jobs:
           docker build --platform linux/amd64 --tag niu-addon-validation:local niusmart_activation
   publish:
     needs: validate
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && endsWith(github.event.head_commit.message, '[publish 0.4.4]'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

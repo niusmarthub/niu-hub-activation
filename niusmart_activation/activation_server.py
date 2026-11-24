@@ -1151,10 +1151,50 @@ def entity_state_sync_loop():
         STOP.wait(interval)
 
 
+BMS_SNAPSHOT = None
+
+
+def bms_capture_loop():
+    from hub_bms import read_battery_readings
+    from hub_event_queue import EventQueue, check_identity, post_json
+
+    global BMS_SNAPSHOT
+    supported = None
+    next_probe = 0
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            enabled = (load_json(ADDON_OPTIONS) or {}).get('bms_sync') is True
+            if enabled and validate_identity_for_sync(config) and not PENDING_FILE.exists():
+                binding = EventQueue.identity(config)
+                now = time.monotonic()
+                if supported != binding and now >= next_probe:
+                    next_probe = now + 300
+                    base = validate_base_url(config['api_base_url'])
+                    reply = post_json(base, config, 'hub_batch_api.php', {'action': 'capabilities'})
+                    check_identity(reply, config)
+                    if 'bms_ble_v1' in reply.get('capabilities', []):
+                        supported = binding
+                if supported == binding:
+                    BMS_SNAPSHOT = (binding, now, read_battery_readings())
+                else:
+                    BMS_SNAPSHOT = None
+            else:
+                BMS_SNAPSHOT = None
+                supported = None
+                next_probe = 0
+        except Exception as exc:
+            BMS_SNAPSHOT = None
+            diagnostic_error('bms_capture_error', exc)
+        STOP.wait(60)
+
+
 def batch_sync_loop():
+    from hub_bms import BMS_SOURCE
+
     queue = None
     identity = last_level = last_mode = None
-    next_report = next_flush = eco_due = 0
+    next_report = next_flush = eco_due = next_bms = 0
     eco_draining = False
     retry = 2
     while not STOP.is_set():
@@ -1168,7 +1208,7 @@ def batch_sync_loop():
                 now = time.monotonic()
                 if binding != identity:
                     identity = binding
-                    next_report = next_flush = 0
+                    next_report = next_flush = next_bms = 0
                     eco_due = now + ECO_BATCH_INTERVAL
                     last_level = last_mode = None
                     eco_draining = False
@@ -1188,6 +1228,15 @@ def batch_sync_loop():
                 if confirmed_mode and now >= next_flush and (
                     mode == 'normal' or now >= eco_due or eco_draining or level != 'ok'
                 ):
+                    snapshot = BMS_SNAPSHOT
+                    if (snapshot and snapshot[0] == binding and now >= next_bms
+                            and 0 <= now - snapshot[1] <= 120):
+                        next_bms = now + 60
+                        try:
+                            for entity, state, label in snapshot[2]:
+                                queue.append(config, entity, BMS_SOURCE, state, time.time(), friendly_name=label)
+                        except Exception as exc:
+                            diagnostic_error('bms_queue_error', exc)
                     try:
                         count = queue.flush_once(config, base)
                         next_flush = now + (0 if count is None or count else 2)
@@ -1684,6 +1733,7 @@ if __name__ == '__main__':
     Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
     Thread(target=entity_state_sync_loop, daemon=True).start()
+    Thread(target=bms_capture_loop, daemon=True).start()
     Thread(target=batch_sync_loop, daemon=True).start()
     Thread(target=mqtt_dependency_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
