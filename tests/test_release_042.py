@@ -91,10 +91,10 @@ class ModuleFallbackTests(unittest.TestCase):
 
         def cloud():
             cloud_calls.append(True)
-            return {'sensor': {'1': 22}}
+            return {'sensor': {'1': 22}}, {}
 
         def snapshot(fallback=None):
-            return hub_modules.snapshot_modules(feed, endpoints, self.fail, cloud_states=fallback,
+            return hub_modules.snapshot_modules(feed, endpoints, self.fail, cloud_reader=fallback,
                                                 last_values=cache)[0]
 
         with patch.object(hub_modules, 'read_datapoints', return_value={'1': 21}):
@@ -105,3 +105,34 @@ class ModuleFallbackTests(unittest.TestCase):
             cached = snapshot()
             self.assertEqual(cached['source'], 'cache')
             self.assertFalse(cached['read'])
+
+
+class CloudSondeTests(unittest.TestCase):
+    def test_reports_unchanged_temperature_and_keeps_old_data_as_cache_after_restart(self):
+        from datetime import datetime, timedelta, timezone
+        from hub_tuya_cloud import read_cloud_states
+
+        now = datetime.now(timezone.utc)
+        entity_id = 'sensor.rem_0021_tank_temp_temperature'
+        device_id = 'tuya-th06'
+        module = {'tuya_device_id': device_id, 'datapoints': [
+            {'dp_id': 1, 'status_code': 'va_temperature', 'scale': 1},
+        ]}
+        feed = {'modules': [module]}
+        endpoints = {device_id: {'discovered': False, 'ip': None, 'version': None}}
+        devices = [{'id': 'ha-device', 'identifiers': [['tuya', device_id]]}]
+        entities = [{'entity_id': entity_id, 'platform': 'tuya', 'device_id': 'ha-device',
+                     'unique_id': 'tuya-th06-temperature'}]
+        hour = (now - timedelta(hours=6)).isoformat()
+        state = {'entity_id': entity_id, 'state': '19.2', 'last_updated': hour}
+        with patch('hub_tuya_cloud._ws_request', return_value=(devices, entities, [state])):
+            snapshots = hub_modules.snapshot_modules(
+                feed, endpoints, self.fail, cloud_reader=lambda: read_cloud_states(feed),
+            )
+            self.assertEqual(snapshots[0]['source'], 'cache')
+            self.assertFalse(snapshots[0]['read'])
+            self.assertEqual(snapshots[0]['datapoints'][0]['raw'], 192)
+            state['last_reported'] = now.isoformat()
+            self.assertEqual(read_cloud_states(feed), ({device_id: {'1': 192}}, {}))
+            state['last_reported'] = (now - timedelta(days=2)).isoformat()
+            self.assertEqual(read_cloud_states(feed), ({}, {}))

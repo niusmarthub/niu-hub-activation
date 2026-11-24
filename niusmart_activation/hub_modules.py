@@ -169,7 +169,7 @@ def public_datapoints(module, values):
     return rows
 
 
-def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_states=None,
+def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_reader=None,
                      last_values=None):
     def read_local(module):
         device_id = module["tuya_device_id"]
@@ -185,9 +185,9 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_sta
     read = executor.map if executor is not None else map
     modules = feed["modules"]
     local_states = list(read(read_local, modules))
-    if callable(cloud_states):
-        cloud_states = cloud_states() if any(value is None for value in local_states) else {}
-    cloud_states = cloud_states or {}
+    cloud_states, cloud_cache = ({}, {})
+    if cloud_reader is not None and any(value is None for value in local_states):
+        cloud_states, cloud_cache = cloud_reader()
     last_values = last_values if last_values is not None else {}
     now = monotonic()
     snapshots = []
@@ -206,6 +206,8 @@ def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_sta
                 values, source = cached, "cache"
             else:
                 del last_values[device_id]
+        if not values and cloud_cache.get(device_id):
+            values, source = cloud_cache[device_id], "cache"
         snapshots.append({
             "source": source,
             "id": device_id, "name": module.get("device_name") or device_id,

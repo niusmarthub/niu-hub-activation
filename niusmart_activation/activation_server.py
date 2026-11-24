@@ -788,7 +788,7 @@ def update_tuya_inventory(feed, scan):
 
 
 def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, tracked_switches,
-                         cloud_states=None, last_values=None):
+                         cloud_reader=None, last_values=None):
     from hub_modules import apply_relay_commands, publish_module_states, snapshot_modules
 
     global MODULE_STATUS
@@ -798,7 +798,7 @@ def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, 
     if not activated:
         return
     modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc),
-                               executor=executor, cloud_states=cloud_states, last_values=last_values)
+                               executor=executor, cloud_reader=cloud_reader, last_values=last_values)
     if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
         return
     if listener:
@@ -925,7 +925,7 @@ def tuya_state_loop():
     from hub_tuya_cloud import read_cloud_states
 
     cloud_job = cloud_feed = None
-    cloud_sample = {}
+    cloud_sample = ({}, {})
     cloud_read_at = 0
     next_cloud_attempt = 0
     last_values = {}
@@ -946,7 +946,7 @@ def tuya_state_loop():
             cloud_feed = feed
             cloud_job = cloud_executor.submit(read_cloud_states, feed)
             next_cloud_attempt = now + 60
-        return cloud_sample if now - cloud_read_at < 90 else {}
+        return cloud_sample if now - cloud_read_at < 90 else ({}, {})
 
     sent = {}
     tracked_switches = set()
@@ -962,7 +962,7 @@ def tuya_state_loop():
                 target_site = (targets[0]['site_id'], target_hub) if targets else None
                 if target_site != previous_site:
                     previous_site = target_site
-                    cloud_sample = {}
+                    cloud_sample = ({}, {})
                     cloud_read_at = next_cloud_attempt = 0
                     last_values.clear()
                     if listener:

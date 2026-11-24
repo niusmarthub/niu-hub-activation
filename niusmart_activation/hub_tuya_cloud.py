@@ -11,6 +11,7 @@ import websocket
 
 INVALID = {"unknown", "unavailable", "none", ""}
 CLOUD_MAX_AGE = 1800
+CACHE_MAX_AGE = 86400
 ALIAS = {
     "va_temperature": ("temperature",),
     "humidity_value": ("humidity",),
@@ -67,10 +68,10 @@ def _raw_value(value, dp):
 
 
 def read_cloud_states(feed):
-    """Return {tuya_device_id: {dp_id: raw_value}} for verified Tuya entities."""
+    """Return fresh and cached datapoints for verified Tuya entities."""
     response = _ws_request(["config/device_registry/list", "config/entity_registry/list", "get_states"])
     if response is None:
-        return {}
+        return {}, {}
     devices, entities, states = response
     expected = {item["tuya_device_id"]: item for item in feed.get("modules", [])}
     matched = {}
@@ -83,7 +84,8 @@ def read_cloud_states(feed):
             matched[device["id"]] = ids[0]
     by_entity = {state.get("entity_id"): state for state in states}
     now = datetime.now(timezone.utc)
-    output = {}
+    fresh, cached = {}, {}
+    reported = {}
     for entity in entities:
         device_id = matched.get(entity.get("device_id"))
         if not device_id or entity.get("platform") != "tuya" or entity.get("disabled_by"):
@@ -92,8 +94,10 @@ def read_cloud_states(feed):
         if not state or str(state.get("state", "")).lower() in INVALID:
             continue
         try:
-            stamp = datetime.fromisoformat(state["last_updated"].replace("Z", "+00:00"))
-            if abs((now - stamp).total_seconds()) > CLOUD_MAX_AGE:
+            timestamp = state.get("last_reported") or state["last_updated"]
+            stamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            age = (now - stamp).total_seconds()
+            if not -60 <= age < CACHE_MAX_AGE:
                 continue
         except (KeyError, ValueError, TypeError):
             continue
@@ -121,6 +125,16 @@ def read_cloud_states(feed):
             continue
         dp = candidates[0][1]
         value = _raw_value(str(state["state"]), dp)
-        if value is not None:
-            output.setdefault(device_id, {})[str(dp["dp_id"])] = value
-    return output
+        if value is None:
+            continue
+        dp_id = str(dp["dp_id"])
+        key = device_id, dp_id
+        if key in reported and reported[key] >= stamp:
+            continue
+        reported[key] = stamp
+        if age <= CLOUD_MAX_AGE:
+            fresh.setdefault(device_id, {})[dp_id] = value
+            cached.get(device_id, {}).pop(dp_id, None)
+        else:
+            cached.setdefault(device_id, {})[dp_id] = value
+    return fresh, cached
