@@ -1,5 +1,5 @@
 name: "Niu Hub Activation"
-version: "0.4.4"
+version: "0.4.5"
 slug: "niu_activation"
 # Image multiarchitecture construite et publiee par GitHub Actions.
 # Le Supervisor telecharge la version correspondante au lieu de compiler sur le hub.
