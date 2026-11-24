@@ -306,14 +306,15 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
                     counts["other"] += 1
                 messages.append((f"{topic_base}/availability", "online" if online else "offline", True))
                 continue
-            if source == "cache" or (source == "tuya_cloud" and dp["relay_candidate"]):
+            # Cached sensor values remain publishable; never use cache to drive relays.
+            if source in ("cache", "tuya_cloud") and dp["relay_candidate"]:
                 continue
             if energy_measurement:
                 if not energy_enabled:
                     continue
                 if (module["product_id"] == ENERGY_PRODUCT
                         and dp["device_class"] is None and dp["id"] in ("102", "104")):
-                    if not module["read"]:
+                    if not module["read"] and source != "cache":
                         continue
                     if value not in ("FORWARD", "REVERSE"):
                         value = "Inconnu"
