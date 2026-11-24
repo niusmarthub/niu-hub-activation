@@ -14,8 +14,6 @@ import yaml
 from hub_mqtt import mqtt_service, publish_samples
 from hub_solar import legacy_measures
 
-INPUT_DEVICE = {"identifiers": ["rem-0021_ndih432"], "name": "NDIH-432 module"}
-INPUT_IDS = {f"rem-0021_n4dih32_di{number:02d}" for number in range(1, 33)}
 CAN_SOURCE = Path("/usr/local/share/niu_can")
 TOPIC = re.compile(r"[A-Za-z0-9_-]+")
 INVALID_STATE = {"unknown", "unavailable", ""}
@@ -69,7 +67,12 @@ def yaml_mapping(node):
     return {key.value: (key, value) for key, value in node.value if isinstance(key, yaml.ScalarNode)}
 
 
-def group_inputs(source):
+def group_inputs(source, hub_id):
+    hub_id = hub_id.lower()
+    if not TOPIC.fullmatch(hub_id):
+        raise ValueError("Identifiant MQTT des entrées invalide")
+    input_ids = {f"{hub_id}_n4dih32_di{number:02d}" for number in range(1, 33)}
+    device_ids = [f"{hub_id}_ndih432"]
     mqtt = yaml_mapping(yaml.compose(source)).get("mqtt", (None, None))[1]
     sensors = yaml_mapping(mqtt).get("binary_sensor", (None, None))[1]
     if not isinstance(sensors, yaml.SequenceNode) or sensors.flow_style:
@@ -81,7 +84,7 @@ def group_inputs(source):
         keys = yaml_mapping(sensor)
         identifier = keys.get("unique_id", (None, None))[1]
         topic = keys.get("state_topic", (None, None))[1]
-        if not isinstance(identifier, yaml.ScalarNode) or identifier.value not in INPUT_IDS:
+        if not isinstance(identifier, yaml.ScalarNode) or identifier.value not in input_ids:
             continue
         if identifier.value in matched or not isinstance(topic, yaml.ScalarNode) or topic.value != "niusmart/data":
             raise ValueError("Configuration des entrées NDIH-432 inattendue")
@@ -90,7 +93,7 @@ def group_inputs(source):
             device = yaml_mapping(keys["device"][1])
             ids = device.get("identifiers", (None, None))[1]
             if (not isinstance(ids, yaml.SequenceNode)
-                    or [item.value for item in ids.value] != INPUT_DEVICE["identifiers"]):
+                    or [item.value for item in ids.value] != device_ids):
                 raise ValueError("Un appareil MQTT différent est déjà associé au NDIH-432")
             continue
         end = source.find("\n", identifier.end_mark.index)
@@ -99,14 +102,14 @@ def group_inputs(source):
         indent = " " * keys["unique_id"][0].start_mark.column
         block = newline.join((
             f"{indent}device:",
-            f"{indent}  identifiers: {json.dumps(INPUT_DEVICE['identifiers'])}",
-            f"{indent}  name: {json.dumps(INPUT_DEVICE['name'])}",
+            f"{indent}  identifiers: {json.dumps(device_ids)}",
+            f'{indent}  name: "NDIH-432 module"',
             "",
         ))
         inserts.append((end + 1, block))
     if not matched:
         return source
-    if matched != INPUT_IDS:
+    if matched != input_ids:
         raise ValueError("Le bloc MQTT ne contient pas les 32 entrées attendues")
     for index, block in reversed(inserts):
         source = source[:index] + block + source[index:]
@@ -114,13 +117,13 @@ def group_inputs(source):
     return source
 
 
-def configure_inputs(root, reload_flag, write_json):
+def configure_inputs(root, reload_flag, write_json, hub_id):
     path = root / "configuration.yaml"
     if not path.is_file():
         return
     original = path.read_bytes()
     source = original.decode("utf-8")
-    updated = group_inputs(source)
+    updated = group_inputs(source, hub_id)
     if updated != source:
         details = path.stat()
         backup = root / "configuration.yaml.niu-before-ndih432"

@@ -135,10 +135,10 @@ class MqttFeaturesTests(unittest.TestCase):
             flag = root / "pending"
             with patch.object(ha, "core_api", side_effect=[RuntimeError("unavailable"), []]) as core:
                 with self.assertRaises(RuntimeError):
-                    ha.configure_inputs(root, flag, lambda path, data: path.write_text(json.dumps(data)))
+                    ha.configure_inputs(root, flag, lambda path, data: path.write_text(json.dumps(data)), "REM-0021")
                 grouped = path.read_text()
                 self.assertTrue(flag.exists())
-                ha.configure_inputs(root, flag, lambda path, data: self.fail("YAML was rewritten"))
+                ha.configure_inputs(root, flag, lambda path, data: self.fail("YAML was rewritten"), "REM-0021")
             self.assertEqual(grouped.count('name: "NDIH-432 module"'), 32)
             self.assertEqual(path.read_text(), grouped)
             self.assertEqual((root / "configuration.yaml.niu-before-ndih432").read_text(), configuration)

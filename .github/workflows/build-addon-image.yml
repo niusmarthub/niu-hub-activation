@@ -1,7 +1,7 @@
 name: Build Niu Hub Activation images
 on:
   push:
-    branches: [main]
+    branches: [dev-0.4.2]
     paths:
       - "niusmart_activation/**"
       - ".github/workflows/build-addon-image.yml"
@@ -14,20 +14,25 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
+    if: github.ref == 'refs/heads/dev-0.4.2'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Validate Python and addon metadata
         run: |
-          python3 -m pip install --quiet PyYAML
+          python3 -m pip install --quiet PyYAML tinytuya paho-mqtt websocket-client bleak
           python3 -m compileall -q niusmart_activation
           python3 - <<'PY'
           import pathlib, yaml
           cfg = yaml.safe_load(pathlib.Path("niusmart_activation/config.yaml").read_text())
-          assert cfg["version"] == "0.4.1", "Version mismatch"
+          assert cfg["version"] == "0.4.2", "Version mismatch"
           assert cfg["arch"] == ["aarch64", "amd64"]
           assert cfg["image"] == "ghcr.io/niusmarthub/niu-hub-activation"
           PY
+      - name: Test batch transport and hub features
+        run: |
+          PYTHONPATH=niusmart_activation:tests python3 -m unittest -q \
+            test_release_042 test_activation test_mqtt_features test_mqtt_relays test_router_traffic test_optional_modules test_netbird_status
       - name: Verify Dockerfile build context
         run: |
           docker build --platform linux/amd64 --tag niu-addon-validation:local niusmart_activation
@@ -49,7 +54,7 @@ jobs:
           context: ./niusmart_activation
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/niusmarthub/niu-hub-activation:0.4.1
+          tags: ghcr.io/niusmarthub/niu-hub-activation:0.4.2
           provenance: false
 
   verify-public-image:
@@ -63,7 +68,7 @@ jobs:
           import urllib.request
           base = "https://ghcr.io"
           image = "niusmarthub/niu-hub-activation"
-          tag = "0.4.1"
+          tag = "0.4.2"
           token_url = base + "/token?scope=repository:" + image + ":pull&service=ghcr.io"
           with urllib.request.urlopen(token_url, timeout=30) as response:
               token = json.load(response)["token"]

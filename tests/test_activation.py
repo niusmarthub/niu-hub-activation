@@ -40,7 +40,7 @@ class ActivationTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.orig = {}
-        for name in ('DATA_DIR', 'CONFIG_FILE', 'BACKUP_FILE', 'PENDING_FILE', 'ROTATION_FILE', 'IDENTIFIER_FILE', 'api'):
+        for name in ('DATA_DIR', 'CONFIG_FILE', 'BACKUP_FILE', 'PENDING_FILE', 'ROTATION_FILE', 'IDENTIFIER_FILE', 'SHARED_FILE', 'SHARED_ARCHIVE', 'api'):
             self.orig[name] = getattr(hub, name)
         self.addCleanup(self.restore)
         path = Path(self.tmp.name)
@@ -50,6 +50,9 @@ class ActivationTest(unittest.TestCase):
         hub.PENDING_FILE = path / 'activation_pending.json'
         hub.ROTATION_FILE = path / 'key_rotation_pending.json'
         hub.IDENTIFIER_FILE = path / 'hub_identifier'
+        hub.SHARED_FILE = path / 'homeassistant' / 'niusmart' / 'hub_config.json'
+        hub.SHARED_ARCHIVE = hub.SHARED_FILE.parent / 'archive' / 'hub_hub_config.json'
+        hub.SHARED_FILE.parent.mkdir(parents=True)
         hub.IDENTIFIER_FILE.write_text(HUB_ID + '\n')
 
     def restore(self):
@@ -57,10 +60,14 @@ class ActivationTest(unittest.TestCase):
             setattr(hub, name, value)
 
     def put_config(self, obj=CONFIG):
-        hub.write_json_atomic(hub.CONFIG_FILE, json.loads(json.dumps(obj)))
+        hub.SHARED_FILE.write_text(json.dumps({
+            'hub': {key: obj[key] for key in ('site_id', 'device_code', 'hub_identifier')},
+            'niusmart': {'api_key': obj['api_key'], 'server_url': obj['api_base_url']},
+            **({'site_config': obj['site_config']} if 'site_config' in obj else {}),
+        }))
 
     def get_config(self):
-        return hub.load_json(hub.CONFIG_FILE)
+        return hub.load_active_config()
 
     def test_activation_requires_every_site_field(self):
         conf = dict(CONFIG)
@@ -192,9 +199,10 @@ class ActivationTest(unittest.TestCase):
         hub.api = lambda payload, url=None: {'success':True,'config':dict(CONFIG, api_key=NEW_KEY)}
         with self.assertRaises(RuntimeError):
             hub.recover_if_needed()
-        self.assertFalse(hub.CONFIG_FILE.exists())
+        self.assertFalse(hub.SHARED_FILE.exists())
 
     def test_web_page_logo_and_activation_missing_fields(self):
+        hub.IDENTIFIER_FILE.unlink()
         server = ThreadingHTTPServer(('127.0.0.1', 0), hub.Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -221,7 +229,7 @@ class ActivationTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req)
         self.assertEqual(cm.exception.code, 500)
-        self.assertFalse(hub.CONFIG_FILE.exists())
+        self.assertFalse(hub.SHARED_FILE.exists())
         self.assertFalse(hub.BACKUP_FILE.exists())
 
 

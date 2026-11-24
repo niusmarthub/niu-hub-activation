@@ -1,13 +1,21 @@
-# Niu Hub Activation — pilote REM-0021
+# Niu Hub Activation
 
-Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.php` et des tests Python.
+Ce dépôt contient l’add-on Home Assistant et ses tests Python. Les fichiers cPanel de la version 0.4.2 sont livrés séparément.
+
+## Version 0.4.2
+
+- L’activation et les clés sont liées au site attribué par NiuSmart. Les événements conservés localement restent liés au site et à l’identité du Hub, y compris après une rotation de clé.
+- Le Hub conserve les changements d’état compatibles dans SQLite et les supprime après confirmation de NiuSmart, par lots de 500 événements maximum.
+- En mode AUTO, l’activité sur NiuSmart réveille la synchronisation pendant cinq minutes. La file se vide également toutes les 15 minutes en ÉCONO et en priorité sous pression disque. Les fonctions locales continuent.
+- Le tableau de bord préfère la lecture LOCAL, puis le secours CLOUD via Smart Life dans Home Assistant. La source CACHE affiche la dernière lecture connue sur le tableau de bord local pendant au plus 24 heures.
+- La protection alerte sous 256 Mio libres ou à 75 % de la limite de 256 Mio de la file. Sous 128 Mio libres ou à saturation de la file, la capture suspend les nouvelles écritures d’événements et conserve les événements déjà enregistrés. Les événements refusés sont comptabilisés.
+- La compilation GHCR de cette branche cible `linux/arm64` et `linux/amd64` et publie uniquement le tag `0.4.2`.
 
 ## Modifications
 - Activation : le Hub envoie **uniquement le code d'activation**. NiuSmart genere/attribue `hub_identifier`, retrouve le site, et renvoie la cle API, l'identite et les options. Le PHP rejette les codes expires, inconnus et deja `redeemed`.
 - Synchronisation : lit `/homeassistant/niusmart/hub_config.json` et met à jour les options dans `site_config`. Les anciens fichiers restent lisibles.
 - Archivage : avant remplacement, copie binaire verifiee dans `/homeassistant/niusmart/archive/hub_hub_config.json` (une seule archive tournante). **L'archive manuelle n'est jamais modifiee.**
 - Rotation : `key-update.php` conserve les etapes check/commit/ack. La rotation n'est pas une synchronisation ordinaire.
-- Le site 1 est refusé pendant le pilote.
 - Une fois le hub activé, le Supervisor détecte et démarre NetBird. Pour une installation neuve, Niu Hub utilise la clé fournie à l’activation, celle de la section `netbird` ou l’option `netbird_setup_key` de l’add-on. L’option `netbird_repository` permet de choisir le dépôt. Le démarrage du client et sa connexion au réseau NetBird sont deux états distincts.
 - Le tableau de bord affiche les options NiuSmart et les datapoints reçus ou lus localement. Le suivi de l’énergie publie les mesures de tous les modules dont la description indique un statut électrique, une unité et une échelle. Le profil PJ1103B fournit ces informations lorsqu’elles manquent pour ce produit. NiuSmart associe ensuite les statuts aux fonctions du site.
 
@@ -64,8 +72,8 @@ Ce paquet contient l'add-on Home Assistant, `hub-activation.php`, `key-update.ph
 
 ## Limites connues
 - Changement de serveur : non implemente, doit rester interdit.
-- Recuperation automatique : non operationnelle sans endpoint PHP `recover`.
-- L’activation reste limitée au site pilote. Les datapoints candidats au contrôle de relais sont signalés pour validation.
+- La récupération automatique exige les API 0.4.2 et une sauvegarde locale authentifiable.
+- Les datapoints candidats au contrôle de relais sont signalés pour validation.
 - Un Hub ancien sans identifiant `hub.hub_identifier` utilise son ancien identifiant persistant dans `/data/hub_identifier`.
 - Pas de modification des secrets des integrations tierces par la synchronisation.
 

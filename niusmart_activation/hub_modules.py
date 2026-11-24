@@ -169,33 +169,53 @@ def public_datapoints(module, values):
     return rows
 
 
-def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_states=None):
-    def snapshot(module):
+def snapshot_modules(feed, endpoints, on_read_error, *, executor=None, cloud_states=None,
+                     last_values=None):
+    def read_local(module):
         device_id = module["tuya_device_id"]
         endpoint = endpoints[device_id]
-        values = None
-        # An old address may now belong to another device. Use a current discovery.
+        # Verify an address before using it for this device.
         if endpoint["discovered"] or endpoint.get("ip_source") == "manual":
             try:
-                values = read_datapoints(module, endpoint)
+                return read_datapoints(module, endpoint) or None
             except Exception as exc:
                 on_read_error(exc)
-        source = "local" if values is not None else "unavailable"
-        if values is None and cloud_states and device_id in cloud_states:
-            values = cloud_states[device_id]
-            source = "tuya_cloud"
-        return {
+        return None
+
+    read = executor.map if executor is not None else map
+    modules = feed["modules"]
+    local_states = list(read(read_local, modules))
+    if callable(cloud_states):
+        cloud_states = cloud_states() if any(value is None for value in local_states) else {}
+    cloud_states = cloud_states or {}
+    last_values = last_values if last_values is not None else {}
+    now = monotonic()
+    snapshots = []
+    for module, values in zip(modules, local_states):
+        device_id = module["tuya_device_id"]
+        endpoint = endpoints[device_id]
+        source = "local"
+        if values is None:
+            values = cloud_states.get(device_id)
+            source = "tuya_cloud" if values else "unavailable"
+        if values:
+            last_values[device_id] = (now, values)
+        elif device_id in last_values:
+            at, cached = last_values[device_id]
+            if now - at < 86400:
+                values, source = cached, "cache"
+            else:
+                del last_values[device_id]
+        snapshots.append({
             "source": source,
             "id": device_id, "name": module.get("device_name") or device_id,
             "product": module.get("product_name"), "product_id": module.get("product_id"),
             "ip": endpoint["ip"], "protocol": endpoint["version"],
-            "seen": endpoint["discovered"], "read": values is not None,
+            "seen": endpoint["discovered"], "read": source in ("local", "tuya_cloud"),
             "manual_ip": endpoint.get("manual_ip"), "ip_source": endpoint.get("ip_source"),
             "datapoints": public_datapoints(module, values),
-        }
-
-    read = executor.map if executor is not None else map
-    return list(read(snapshot, feed["modules"]))
+        })
+    return snapshots
 
 
 def apply_relay_commands(feed, endpoints, modules, commands, executor, is_current, on_error):
@@ -242,6 +262,7 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
         device_id = module["id"]
         if not TOPIC_ID.fullmatch(device_id):
             continue
+        source = module.get("source", "local")
         if module["product_id"] == ENERGY_PRODUCT:
             # The old diagnostic used a different entity ID and retained its raw state.
             retired_topics.update((
@@ -264,7 +285,7 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
             topic_base = f"niusmart/{hub_id}/tuya/{device_id}/{dp_id}"
             state_topic = f"{topic_base}/state"
             device = {"identifiers": [f"niusmart_tuya_{device_id}"], "name": module["name"]}
-            if dp["relay_candidate"] and (module["source"] == "local" and module["seen"] or (device_id, dp_id) in tracked_switches):
+            if dp["relay_candidate"] and (source == "local" and (module["seen"] or module.get("ip_source") == "manual") or (device_id, dp_id) in tracked_switches):
                 active_switches.add((device_id, dp_id))
                 config = {
                     "name": relay_names[dp_id], "unique_id": unique_id, "state_topic": state_topic,
@@ -277,11 +298,13 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
                 retired_topics.add(f"homeassistant/sensor/{unique_id}/config")
                 messages.append((f"homeassistant/switch/{unique_id}/config", json.dumps(config), True))
                 published_datapoints.append((dp, config["name"], "switch"))
-                online = module["read"] and type(value) is bool
+                online = source == "local" and module["read"] and type(value) is bool
                 if online:
                     messages.append((state_topic, "on" if value else "off", False))
                     counts["other"] += 1
                 messages.append((f"{topic_base}/availability", "online" if online else "offline", True))
+                continue
+            if source == "cache" or (source == "tuya_cloud" and dp["relay_candidate"]):
                 continue
             if energy_measurement:
                 if not energy_enabled:

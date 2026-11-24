@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""NiuSmart | Niu Hub Activation -- version 0.3.2.
+"""NiuSmart | Niu Hub Activation.
 
 Architecture : cinq modes separes. Ne JAMAIS transformer une synchronisation
 ordinaire en activation, rotation de cle ou changement de serveur.
 
-MODE 1 - ACTIVATION (operationnel, seulement pour le site pilote REM-0021)
+MODE 1 - ACTIVATION (site attribue par le serveur)
     POST /activate -> NiuSmart action=activate, puis action=confirm.
     Exige TOUS les champs obligatoires de la configuration du site avant
     d'ecrire hub_config.json. Une activation ne remplace pas un hub configure.
@@ -32,13 +32,11 @@ MODE 4 - CHANGEMENT DE SERVEUR (reserve pour une version future)
     toute modification de api_base_url. La sauvegarde ne change qu'apres ACK.
     AUCUN changement automatique de serveur n'est active dans cette version.
 
-MODE 5 - RECUPERATION (client pret; endpoint serveur restant a implementer)
-    Quand hub_config.json est absent/invalide, la cle de secours permet de
+MODE 5 - RECUPERATION
+    Quand hub_config.json est absent, la cle de secours permet de
     demander au serveur d'origine une configuration COMPLETE par action=recover.
     La reponse doit etre authentifiee et correspondre au meme Hub/site/cle.
-    Le serveur PHP actuel ne prend pas encore en charge action=recover :
-    en cas d'echec, aucun fichier local n'est ecrase, et l'intervention manuelle
-    reste possible. Ce mode NE cree PAS une nouvelle activation.
+    La recuperation conserve toute configuration deja presente.
 
 Fichiers persistants de l'add-on (dans /data, jamais dans le code installe) :
   hub_config.json               ancien format prive (migration uniquement)
@@ -47,8 +45,7 @@ Fichiers persistants de l'add-on (dans /data, jamais dans le code installe) :
   activation_pending.json       confirmation initiale non terminee
   key_rotation_pending.json     reprise de rotation, cles sensibles (mode 0600)
 
-Aucune dependance Python tierce. Executer dans le conteneur de l'add-on HA OS,
-jamais directement dans le shell de l'hote Home Assistant.
+Executer dans le conteneur de l'add-on Home Assistant OS.
 """
 
 import asyncio
@@ -102,12 +99,12 @@ ACTIVATION_URL = os.environ.get('NIU_ACTIVATION_URL', DEFAULT_BASE_URL + '/hub-a
 KEY_UPDATE_URL = os.environ.get('NIU_KEY_UPDATE_URL', DEFAULT_BASE_URL + '/key-update.php')
 BIND = os.environ.get('NIU_BIND', '0.0.0.0')
 PORT = int(os.environ.get('NIU_PORT', '8099'))
-# Restriction TEMPORAIRE : le PHP actuel autorise la synchronisation du site 2.
-PILOT_SITE_ID = 2
 STOP = Event()
 LOCK = Lock()
 DISCOVERY_LOCK = Lock()
 DISCOVERY_REQUEST = Event()
+STATE_RESCAN = Event()
+BATCH_WAKE = Event()
 SYNC_REQUEST = Event()
 DISCOVERY_STATUS = 'En attente'
 TUYA_TARGETS = None
@@ -208,13 +205,13 @@ def load_active_config():
     return None
 
 
-def save_active_config(config, activation=False, netbird_settings=None):
+def save_active_config(config, activation=False, netbird_settings=None, *, recovery=False):
     """Sauvegarde tournante avant remplacement, restauration sur echec.
 
     L'archive manuelle n'est jamais lue ni modifiee par cette fonction.
     """
     validate_config(config, require_full_site=False)
-    if activation and not SHARED_FILE.exists():
+    if (activation or recovery) and not SHARED_FILE.exists():
         shared = {
             'hub': {'site_id': config['site_id'], 'device_code': config['device_code']},
             'niusmart': {'server_url': config['api_base_url']},
@@ -224,15 +221,15 @@ def save_active_config(config, activation=False, netbird_settings=None):
         shared = load_json(SHARED_FILE)
     if not isinstance(shared, dict) or not isinstance(shared.get('hub'), dict) or not isinstance(shared.get('niusmart'), dict):
         raise RuntimeError('Fichier HA invalide; aucune modification')
-    if shared['hub'].get('site_id') != PILOT_SITE_ID or shared['hub'].get('site_id') != config['site_id']:
-        raise RuntimeError('Site HA different du site pilote')
+    if shared['hub'].get('site_id') != config['site_id']:
+        raise RuntimeError('Site HA different du site active')
     if shared['hub'].get('device_code') != config['device_code']:
         raise RuntimeError('Identite appareil differente')
     # Pas de changement de serveur ou cle lors d'une simple mise a jour.
     # Les changements sont effectues uniquement par le mode qui fournit config.
     if shared['niusmart'].get('server_url') != config['api_base_url']:
         raise RuntimeError('Changement serveur non autorise')
-    if activation:
+    if activation or recovery:
         if is_nonblank(shared['niusmart'].get('api_key')):
             raise RuntimeError('Cle deja presente: reactivation interdite')
         if is_nonblank(shared['hub'].get('hub_identifier')):
@@ -400,7 +397,7 @@ def validate_identity_for_sync(config):
         if candidate.get('site_config') is None:
             candidate['site_config'] = {}
         validate_config(candidate, require_full_site=False)
-        return candidate['site_id'] == PILOT_SITE_ID
+        return True
     except ValueError:
         return False
 
@@ -466,11 +463,12 @@ def make_backup(config):
 def validate_backup(backup):
     if not isinstance(backup, dict) or set(backup) != (CONFIG_FIELDS - {'site_config'}):
         raise ValueError('Sauvegarde incomplete')
-    if type(backup['site_id']) is not int or backup['site_id'] != PILOT_SITE_ID:
+    if type(backup['site_id']) is not int or backup['site_id'] < 1:
         raise ValueError('Site de secours invalide')
     if not isinstance(backup['hub_identifier'], str) or not IDENTIFIER_PATTERN.fullmatch(backup['hub_identifier']):
         raise ValueError('Identifiant de secours invalide')
-    if backup['hub_identifier'] != hub_identity():
+    known_identity = hub_identity()
+    if known_identity is not None and backup['hub_identifier'] != known_identity:
         raise ValueError('Sauvegarde associee a un autre Hub')
     if not is_nonblank(backup['api_key']) or not is_nonblank(backup['device_code']):
         raise ValueError('Cle de secours invalide')
@@ -511,7 +509,7 @@ def resume_rotation(config):
             raise RuntimeError('Journal de rotation illisible; aucune modification')
         return False
     validate_config(config)  # TOUTES les proprietes sont obligatoires.
-    if (config['site_id'] != PILOT_SITE_ID or state.get('site_id') != config['site_id']
+    if (state.get('site_id') != config['site_id']
             or state.get('hub_identifier') != config['hub_identifier']):
         raise RuntimeError('Rotation associee a un autre Hub')
     old_key = state.get('old_api_key')
@@ -641,7 +639,7 @@ def confirm_pending():
     if not isinstance(pending, dict) or not isinstance(config, dict):
         return False
     validate_config(config)
-    if config['hub_identifier'] != hub_identity() or config['site_id'] != PILOT_SITE_ID:
+    if config['hub_identifier'] != hub_identity():
         raise RuntimeError('Activation associee a un autre Hub')
     aid = pending.get('activation_id')
     if type(aid) is not int or aid < 1:
@@ -666,11 +664,7 @@ def confirm_pending():
 
 
 def recover_if_needed():
-    """Recuperation candidate; inactive cote PHP tant que 'recover' n'existe pas.
-
-    La cle backup ne suffit PAS pour reautoriser un Hub revoque. NiuSmart doit
-    verifier identifiant, site, cle et statut active avant de renvoyer le JSON.
-    """
+    """Restore a missing HA configuration after server validation of the saved identity."""
     with LOCK:
         current = load_active_config()
         if SHARED_FILE.exists() or validate_identity_for_sync(current) or PENDING_FILE.exists() or ROTATION_FILE.exists():
@@ -689,12 +683,8 @@ def recover_if_needed():
         for key, value in backup.items():
             if recovered.get(key) != value:
                 raise RuntimeError('Recuperation refusee: identite/cle/serveur differents')
-        if recovered['hub_identifier'] != hub_identity():
-            raise RuntimeError('Identite locale differente')
-        if recovered['site_id'] != PILOT_SITE_ID:
-            raise RuntimeError('Recuperation non autorisee sur ce site')
         # Une reponse complete et authentifiee seulement peut remplacer le fichier.
-        save_active_config(recovered)
+        save_active_config(recovered, recovery=True)
         return True
 
 
@@ -797,7 +787,8 @@ def update_tuya_inventory(feed, scan):
     return modules, f'{detected} module(s) détecté(s) sur {len(modules)} attendu(s). {note}'.strip()
 
 
-def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, tracked_switches):
+def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, tracked_switches,
+                         cloud_states=None, last_values=None):
     from hub_modules import apply_relay_commands, publish_module_states, snapshot_modules
 
     global MODULE_STATUS
@@ -806,14 +797,8 @@ def update_module_status(feed, endpoints, scanned_at, executor, sent, listener, 
                  and (feed['site_id'], feed['hub_id']) == (config['site_id'], config['device_code']))
     if not activated:
         return
-    try:
-        from hub_tuya_cloud import read_cloud_states
-        cloud_states = read_cloud_states(feed)
-    except Exception as exc:
-        diagnostic_error('tuya_cloud_read_error', exc)
-        cloud_states = {}
     modules = snapshot_modules(feed, endpoints, lambda exc: diagnostic_error('tuya_dp_read_error', exc),
-                               executor=executor, cloud_states=cloud_states)
+                               executor=executor, cloud_states=cloud_states, last_values=last_values)
     if TUYA_TARGETS is None or TUYA_TARGETS[0] is not feed:
         return
     if listener:
@@ -937,18 +922,49 @@ def tuya_discovery_loop():
 def tuya_state_loop():
     from hub_modules import DP_ID, TOPIC_ID
     from hub_mqtt import RelayCommandListener, mqtt_service
+    from hub_tuya_cloud import read_cloud_states
+
+    cloud_job = cloud_feed = None
+    cloud_sample = {}
+    cloud_read_at = 0
+    next_cloud_attempt = 0
+    last_values = {}
+
+    def cloud_fallback():
+        nonlocal cloud_job, cloud_feed, cloud_sample, cloud_read_at, next_cloud_attempt
+        feed = targets[0]
+        now = time.monotonic()
+        if cloud_job is not None and cloud_job.done():
+            try:
+                if cloud_feed is feed:
+                    cloud_sample = cloud_job.result()
+                    cloud_read_at = now
+            except Exception as exc:
+                diagnostic_error('tuya_cloud_read_error', exc)
+            cloud_job = None
+        if cloud_job is None and now >= next_cloud_attempt:
+            cloud_feed = feed
+            cloud_job = cloud_executor.submit(read_cloud_states, feed)
+            next_cloud_attempt = now + 60
+        return cloud_sample if now - cloud_read_at < 90 else {}
 
     sent = {}
     tracked_switches = set()
-    hub_id = listener = None
+    hub_id = listener = previous_site = None
     next_mqtt_attempt = 0
     try:
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with (ThreadPoolExecutor(max_workers=8) as executor,
+              ThreadPoolExecutor(max_workers=1) as cloud_executor):
             while not STOP.is_set():
                 started = time.monotonic()
                 targets = TUYA_TARGETS
                 target_hub = targets[0]['hub_id'] if targets else None
-                if target_hub != hub_id:
+                target_site = (targets[0]['site_id'], target_hub) if targets else None
+                if target_site != previous_site:
+                    previous_site = target_site
+                    cloud_sample = {}
+                    cloud_read_at = next_cloud_attempt = 0
+                    last_values.clear()
                     if listener:
                         listener.close()
                         listener = None
@@ -970,7 +986,8 @@ def tuya_state_loop():
                         except Exception as exc:
                             diagnostic_error('tuya_mqtt_command_listener_error', exc)
                     try:
-                        update_module_status(*targets, executor, sent, listener, tracked_switches)
+                        update_module_status(*targets, executor, sent, listener, tracked_switches,
+                                             cloud_fallback, last_values)
                     except Exception as exc:
                         diagnostic_error('tuya_state_error', exc)
                 STOP.wait(max(0.1, TUYA_READ_INTERVAL - (time.monotonic() - started)))
@@ -1010,47 +1027,37 @@ def send_solar_web_sample(config, sample):
         raise RuntimeError('Synchronisation solaire refusée')
 
 
-# Requested mode only; synchronization workers are wired separately.
-ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
-ECO_CONTROL_TIMEOUT = 60
+ECO_CONTROL = (None, 'normal')
+ECO_BATCH_INTERVAL = 15 * 60
 
 
-def requested_sync_mode():
-    snapshot = ECO_CONTROL
-    confirmed = snapshot['confirmed_at']
-    if confirmed is None or time.monotonic() - confirmed > ECO_CONTROL_TIMEOUT:
-        return 'normal'
-    return snapshot['mode']
+def requested_sync_mode(config):
+    from hub_event_queue import EventQueue
+
+    identity, mode = ECO_CONTROL
+    return mode if identity == EventQueue.identity(config) else 'normal'
 
 
 def eco_control_loop():
+    from hub_event_queue import EventQueue, check_identity, post_json
+
     global ECO_CONTROL
-    previous_identity = None
     while not STOP.is_set():
         try:
             config = load_active_config()
             if not validate_identity_for_sync(config) or PENDING_FILE.exists():
-                ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
-                previous_identity = None
+                ECO_CONTROL = (None, 'normal')
             else:
-                identity = tuple(config[k] for k in
-                                 ('site_id', 'hub_identifier', 'api_base_url', 'api_key'))
-                if identity != previous_identity:
-                    ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
-                    previous_identity = identity
-                request = urllib.request.Request(
-                    validate_base_url(config['api_base_url']) + '/hub_cellular_usage_api.php',
-                    data=b'{"action":"mode"}',
-                    headers={'Accept': 'application/json', 'Content-Type': 'application/json'},
-                    method='POST',
-                )
-                request.add_unredirected_header('X-API-Key', config['api_key'])
-                with urllib.request.urlopen(request, timeout=4, context=ssl.create_default_context()) as response:
-                    reply = json.load(response)
-                if (not isinstance(reply, dict) or reply.get('success') is not True
-                        or reply.get('mode') not in ('normal', 'eco')):
+                identity = EventQueue.identity(config)
+                reply = post_json(validate_base_url(config['api_base_url']), config,
+                                  'hub_cellular_usage_api.php', {'action': 'mode'}, timeout=4)
+                check_identity(reply, config)
+                if reply.get('mode') not in ('normal', 'eco'):
                     raise RuntimeError('Invalid eco control response')
-                ECO_CONTROL = {'mode': reply['mode'], 'confirmed_at': time.monotonic()}
+                updated = (identity, reply['mode'])
+                if updated != ECO_CONTROL:
+                    ECO_CONTROL = updated
+                    BATCH_WAKE.set()
         except Exception as exc:
             diagnostic_error('eco_control_error', exc)
         STOP.wait(5)
@@ -1098,7 +1105,7 @@ def solar_web_sync_loop():
             config = load_active_config()
             sample = SOLAR_WEB_SAMPLE
             if (sample and sample is not sent and validate_identity_for_sync(config)
-                    and not PENDING_FILE.exists()
+                    and not PENDING_FILE.exists() and requested_sync_mode(config) == 'normal'
                     and sample[0] == (config['site_id'], config['hub_identifier'])
                     and (config.get('site_config') or {}).get('has_solar_panels') == 1
                     and 0 <= time.time() - sample[1]['sampled_at'] <= 60):
@@ -1111,38 +1118,104 @@ def solar_web_sync_loop():
         STOP.wait(interval)
 
 
+def event_queue():
+    from hub_event_queue import EventQueue
+
+    return EventQueue(DATA_DIR / 'niu_batch_events.sqlite3')
+
+
 def entity_state_sync_loop():
     from hub_state_sync import RECONNECT_INTERVAL, sync_states
 
-    sent = {}
-    previous_identity = None
+    queue = None
     interval = RECONNECT_INTERVAL
     while not STOP.is_set():
         try:
             config = load_active_config()
-            if not validate_identity_for_sync(config) or PENDING_FILE.exists():
-                sent.clear()
-                previous_identity = None
-                interval = RECONNECT_INTERVAL
-            else:
-                identity_fields = ('site_id', 'hub_identifier', 'device_code', 'api_base_url', 'api_key')
-                identity = tuple(config[field] for field in identity_fields)
-                if identity != previous_identity:
-                    sent.clear()
-                    previous_identity = identity
+            if validate_identity_for_sync(config) and not PENDING_FILE.exists():
+                if queue is None:
+                    queue = event_queue()
+                binding = queue.identity(config)
 
                 def still_active():
                     if STOP.is_set() or PENDING_FILE.exists():
                         return False
-                    current = load_active_config() or {}
-                    return tuple(current.get(field) for field in identity_fields) == identity
+                    current = load_active_config()
+                    return validate_identity_for_sync(current) and queue.identity(current) == binding
 
-                sync_states(config, validate_base_url(config['api_base_url']), sent, still_active)
-                interval = RECONNECT_INTERVAL
+                sync_states(config, queue, still_active, STATE_RESCAN)
+            interval = RECONNECT_INTERVAL
         except Exception as exc:
-            diagnostic_error('entity_state_sync_error', exc)
+            diagnostic_error('entity_state_capture_error', exc)
             interval = min(interval * 2, 30)
         STOP.wait(interval)
+
+
+def batch_sync_loop():
+    queue = None
+    identity = last_level = last_mode = None
+    next_report = next_flush = eco_due = 0
+    eco_draining = False
+    retry = 2
+    while not STOP.is_set():
+        BATCH_WAKE.clear()
+        try:
+            config = load_active_config()
+            if validate_identity_for_sync(config) and not PENDING_FILE.exists():
+                if queue is None:
+                    queue = event_queue()
+                binding = queue.identity(config)
+                now = time.monotonic()
+                if binding != identity:
+                    identity = binding
+                    next_report = next_flush = 0
+                    eco_due = now + ECO_BATCH_INTERVAL
+                    last_level = last_mode = None
+                    eco_draining = False
+                health = queue.status(config)
+                level = health['disk_status']
+                if level != last_level:
+                    if last_level == 'blocked':
+                        STATE_RESCAN.set()
+                    last_level = level
+                    next_report = 0
+                base = validate_base_url(config['api_base_url'])
+                mode = requested_sync_mode(config)
+                if mode != last_mode:
+                    last_mode = mode
+                    next_report = next_flush = 0
+                confirmed_mode = ECO_CONTROL[0] == binding
+                if confirmed_mode and now >= next_flush and (
+                    mode == 'normal' or now >= eco_due or eco_draining or level != 'ok'
+                ):
+                    try:
+                        count = queue.flush_once(config, base)
+                        next_flush = now + (0 if count is None or count else 2)
+                        eco_draining = mode == 'eco' and (count is None or bool(count))
+                        if count and health['pending_events'] <= count:
+                            next_report = 0
+                        if not eco_draining:
+                            eco_due = now + ECO_BATCH_INTERVAL
+                        retry = 2
+                    except Exception as exc:
+                        diagnostic_error('batch_sync_error', exc)
+                        next_flush = now + retry
+                        retry = min(retry * 2, 30)
+                if now >= next_report:
+                    next_report = now + (60 if mode == 'normal' or level != 'ok' else 300)
+                    try:
+                        queue.report(config, base, mode)
+                    except Exception as exc:
+                        diagnostic_error('batch_health_report_error', exc)
+                        next_report = now + 15
+                delay = 0.15 if confirmed_mode and now >= next_flush and (mode == 'normal' or eco_draining) else 2
+            else:
+                identity = None
+                delay = 2
+        except Exception as exc:
+            diagnostic_error('batch_worker_error', exc)
+            delay = 5
+        BATCH_WAKE.wait(delay)
 
 
 def can_watchdog_loop():
@@ -1220,12 +1293,10 @@ def homeassistant_features_loop():
             options = config.get('site_config') or {}
             solar_enabled = options.get('has_solar_panels') == 1
             climate_count = options.get('climate_count')
-            pilot = hub_id.upper() == 'REM-0021'
-            if pilot:
-                try:
-                    configure_inputs(root, reload_flag, write_json_atomic)
-                except Exception as exc:
-                    diagnostic_error('mqtt_inputs_error', exc)
+            try:
+                configure_inputs(root, reload_flag, write_json_atomic, hub_id)
+            except Exception as exc:
+                diagnostic_error('mqtt_inputs_error', exc)
 
             climate_installation = 'disabled'
             if climate_count:
@@ -1239,7 +1310,7 @@ def homeassistant_features_loop():
             solar_installation = 'disabled'
             legacy_eco = root / 'custom_components' / 'eco_worthy'
             use_direct_solar = solar_enabled and not legacy_eco.exists() and not legacy_eco.is_symlink()
-            if solar_enabled and pilot and not use_direct_solar:
+            if solar_enabled and not use_direct_solar:
                 try:
                     solar_installation = install_eco_diagnostics(root)
                 except Exception as exc:
@@ -1369,7 +1440,7 @@ def is_activation_template(shared):
     hub, niusmart = shared.get('hub'), shared.get('niusmart')
     return (
         isinstance(hub, dict) and isinstance(niusmart, dict)
-        and hub.get('site_id') == PILOT_SITE_ID and is_nonblank(hub.get('device_code'))
+        and type(hub.get('site_id')) is int and hub['site_id'] > 0 and is_nonblank(hub.get('device_code'))
         and niusmart.get('server_url') == DEFAULT_BASE_URL
         and not is_nonblank(niusmart.get('api_key'))
         and not is_nonblank(hub.get('hub_identifier'))
@@ -1414,6 +1485,12 @@ def dashboard_status():
             'discovery_enabled': TUYA_DISCOVERY_ENABLED,
             **MODULE_STATUS,
         })
+        try:
+            status['batch_sync'] = event_queue().status(config)
+            status['batch_sync']['mode'] = requested_sync_mode(config)
+        except Exception as exc:
+            status['batch_sync'] = {'disk_status': 'unavailable'}
+            diagnostic_error('local_batch_status_error', exc)
     return status
 
 
@@ -1559,8 +1636,8 @@ class Handler(BaseHTTPRequestHandler):
                     'hub_identifier': result.get('hub_identifier'),
                     'site_config': result.get('site_config'),
                 }
-                if type(aid) is not int or aid < 1 or config['site_id'] != PILOT_SITE_ID:
-                    raise RuntimeError('Activation non autorisee sur ce site pilote')
+                if type(aid) is not int or aid < 1:
+                    raise RuntimeError('Identifiant d’activation invalide')
                 validate_config(config)  # TOUS les champs AVANT ecriture.
                 if existing_identifier() is not None:
                     raise RuntimeError('Identifiant deja attribue; activation interdite')
@@ -1607,6 +1684,7 @@ if __name__ == '__main__':
     Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
     Thread(target=entity_state_sync_loop, daemon=True).start()
+    Thread(target=batch_sync_loop, daemon=True).start()
     Thread(target=mqtt_dependency_loop, daemon=True).start()
     if TUYA_DISCOVERY_ENABLED:
         Thread(target=tuya_discovery_loop, daemon=True).start()
