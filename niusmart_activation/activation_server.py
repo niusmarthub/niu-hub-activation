@@ -1010,6 +1010,52 @@ def send_solar_web_sample(config, sample):
         raise RuntimeError('Synchronisation solaire refusée')
 
 
+# Requested mode only; synchronization workers are wired separately.
+ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
+ECO_CONTROL_TIMEOUT = 60
+
+
+def requested_sync_mode():
+    snapshot = ECO_CONTROL
+    confirmed = snapshot['confirmed_at']
+    if confirmed is None or time.monotonic() - confirmed > ECO_CONTROL_TIMEOUT:
+        return 'normal'
+    return snapshot['mode']
+
+
+def eco_control_loop():
+    global ECO_CONTROL
+    previous_identity = None
+    while not STOP.is_set():
+        try:
+            config = load_active_config()
+            if not validate_identity_for_sync(config) or PENDING_FILE.exists():
+                ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
+                previous_identity = None
+            else:
+                identity = tuple(config[k] for k in
+                                 ('site_id', 'hub_identifier', 'api_base_url', 'api_key'))
+                if identity != previous_identity:
+                    ECO_CONTROL = {'mode': 'normal', 'confirmed_at': None}
+                    previous_identity = identity
+                request = urllib.request.Request(
+                    validate_base_url(config['api_base_url']) + '/hub_cellular_usage_api.php',
+                    data=b'{"action":"mode"}',
+                    headers={'Accept': 'application/json', 'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                request.add_unredirected_header('X-API-Key', config['api_key'])
+                with urllib.request.urlopen(request, timeout=4, context=ssl.create_default_context()) as response:
+                    reply = json.load(response)
+                if (not isinstance(reply, dict) or reply.get('success') is not True
+                        or reply.get('mode') not in ('normal', 'eco')):
+                    raise RuntimeError('Invalid eco control response')
+                ECO_CONTROL = {'mode': reply['mode'], 'confirmed_at': time.monotonic()}
+        except Exception as exc:
+            diagnostic_error('eco_control_error', exc)
+        STOP.wait(5)
+
+
 def cellular_web_sync_loop():
     from hub_router_traffic import current_status
 
@@ -1556,6 +1602,7 @@ if __name__ == '__main__':
     from hub_router_traffic import polling_loop as router_traffic_loop
     Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
     Thread(target=cellular_web_sync_loop, daemon=True).start()
+    Thread(target=eco_control_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()
     Thread(target=can_watchdog_loop, daemon=True).start()
     Thread(target=solar_web_sync_loop, daemon=True).start()
