@@ -39,6 +39,22 @@ class MqttRelayTests(unittest.TestCase):
         self.assertEqual(modules[0]["datapoints"][0]["mqtt_name"], "Switch 1")
         self.assertEqual(modules[0]["datapoints"][1]["mqtt_mode"], "sensor")
 
+    def test_cache_publishes_read_only_sensor_without_marking_relay_online(self):
+        cached = module("control1", [{"dp_id": 1, "status_code": "switch_1"},
+                                     {"dp_id": 2, "status_code": "temp_current"}],
+                        {"1": True, "2": 23})
+        cached.update(source="cache", seen=False, read=False)
+        tracked = {("control1", "1")}
+        with patch.object(hub, "mqtt_service"), patch.object(hub, "publish_samples") as publish:
+            hub.publish_module_states("REM-0021", [cached], 90, energy_enabled=False,
+                                      tracked_switches=tracked)
+
+        messages = {topic: payload for topic, payload, _ in publish.call_args.args[1]}
+        self.assertIn("homeassistant/sensor/niusmart_control1_dp2/config", messages)
+        self.assertEqual(messages["niusmart/REM-0021/tuya/control1/2/state"], "23")
+        self.assertEqual(messages["niusmart/REM-0021/tuya/control1/1/availability"], "offline")
+        self.assertNotIn("niusmart/REM-0021/tuya/control1/1/state", messages)
+
     def test_offline_and_removed_relays(self):
         tracked = {("control1", "1"), ("removed", "1")}
         offline = module("control1", [{"dp_id": 1, "status_code": "switch_1"}], {})
