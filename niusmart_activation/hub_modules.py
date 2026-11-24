@@ -63,6 +63,7 @@ ENERGY_CODES = {
 }
 DP_ID = re.compile(r"[1-9][0-9]{0,4}")
 RELAY_CODE = re.compile(r"(?:switch|relay)(?:_[0-9]+)?")
+CACHED_SENSOR_CODES = {"va_temperature", "humidity_value", "va_humidity", "battery_percentage"}
 TOPIC_ID = re.compile(r"[a-zA-Z0-9_-]+")
 RELAY_COMMAND_MAX_AGE = 15
 
@@ -164,7 +165,7 @@ def public_datapoints(module, values):
             "id": dp_id, "name": label, "value": value, "raw": raw, "unit": unit,
             "relay_candidate": relay, "relay_channel": int(code.rsplit("_", 1)[-1])
             if relay and "_" in code else 1 if relay else None, "device_class": device_class, "energy_measurement": eligible,
-            "state_class": state_class,
+            "state_class": state_class, "status_code": code,
         })
     return rows
 
@@ -306,7 +307,11 @@ def publish_module_states(hub_id, modules, expire_after, *, energy_enabled, sent
                     counts["other"] += 1
                 messages.append((f"{topic_base}/availability", "online" if online else "offline", True))
                 continue
-            if source == "cache" or (source == "tuya_cloud" and dp["relay_candidate"]):
+            if source == "cache" and (
+                dp.get("status_code") not in CACHED_SENSOR_CODES or type(value) not in (int, float)
+            ):
+                continue
+            if source == "tuya_cloud" and dp["relay_candidate"]:
                 continue
             if energy_measurement:
                 if not energy_enabled:

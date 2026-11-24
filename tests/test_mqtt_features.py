@@ -11,6 +11,37 @@ from test_mqtt_relays import hub, module
 
 
 class MqttFeaturesTests(unittest.TestCase):
+    def test_cached_climate_readings_keep_publishing_without_enabling_relays(self):
+        tank = module("tank", [
+            {"dp_id": 1, "status_code": "va_temperature"},
+            {"dp_id": 2, "status_code": "humidity_value"},
+            {"dp_id": 4, "status_code": "battery_percentage"},
+            {"dp_id": 10, "status_code": "maxtemp_set"},
+            {"dp_id": 20, "status_code": "switch_1"},
+        ], {"1": 19, "4": 0, "10": 35, "20": True})
+        tank.update(source="cache", seen=False, read=False)
+        expected = {
+            "niusmart/REM-0021/tuya/tank/1/state": "19",
+            "niusmart/REM-0021/tuya/tank/4/state": "0",
+        }
+        sent = {}
+        with patch.object(hub, "mqtt_service"), patch.object(hub, "publish_samples") as publish:
+            with patch.object(hub, "monotonic", side_effect=[100, 129, 130]):
+                for _ in range(3):
+                    hub.publish_module_states(
+                        "REM-0021", [tank], 90, energy_enabled=False, sent=sent,
+                        tracked_switches={("tank", "20")},
+                    )
+
+        self.assertEqual(publish.call_count, 2)
+        for call in publish.call_args_list:
+            messages = {topic: payload for topic, payload, _ in call.args[1]}
+            self.assertEqual({topic: value for topic, value in messages.items()
+                              if topic.endswith("/state")}, expected)
+            self.assertEqual(messages["niusmart/REM-0021/tuya/tank/20/availability"], "offline")
+        self.assertEqual(tank["datapoints"][0]["mqtt_mode"], "sensor")
+        self.assertNotIn("mqtt_mode", tank["datapoints"][1])
+
     def test_two_modules_numbered_without_changing_command_topics(self):
         channels = [{"dp_id": i + 10, "status_code": f"switch_{i}"} for i in range(1, 7)]
         states = {str(i + 10): False for i in range(1, 7)}
