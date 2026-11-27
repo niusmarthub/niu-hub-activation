@@ -35,6 +35,13 @@ CONFIG = {
 }
 
 
+class RouterInterfaceSelectionTest(unittest.TestCase):
+    def test_cellular_interface_is_selected_for_the_pilot(self):
+        self.assertEqual(hub.router_traffic_interface(CONFIG), 'wwan0')
+        self.assertEqual(hub.router_traffic_interface(dict(CONFIG, site_id=10)), 'eth0')
+        self.assertEqual(hub.router_traffic_interface(dict(CONFIG, device_code='OTHER')), 'eth0')
+
+
 class ActivationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

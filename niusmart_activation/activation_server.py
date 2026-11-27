@@ -1063,6 +1063,14 @@ def eco_control_loop():
         STOP.wait(5)
 
 
+def router_traffic_interface(config):
+    from hub_router_traffic import CELLULAR_INTERFACE, LEGACY_INTERFACE
+
+    if config.get('site_id') == 2 and config.get('device_code') == 'REM-0021':
+        return CELLULAR_INTERFACE
+    return LEGACY_INTERFACE
+
+
 def cellular_web_sync_loop():
     from hub_router_traffic import current_status
 
@@ -1073,10 +1081,10 @@ def cellular_web_sync_loop():
             sample = current_status()
             if (validate_identity_for_sync(config) and not PENDING_FILE.exists()
                     and sample.get('status') == 'ok'
-                    and sample.get('interface') == 'eth0'
+                    and sample.get('interface') == router_traffic_interface(config)
                     and 0 <= time.time() - sample['sampled_at'] <= 600):
                 identity = (config['site_id'], config['hub_identifier'],
-                            config['api_base_url'], config['api_key'], sample['sampled_at'])
+                            config['api_base_url'], config['api_key'], sample['interface'], sample['sampled_at'])
                 if identity != sent:
                     payload = {field: sample[field] for field in
                                ('interface', 'sampled_at', 'tracked_rx_bytes', 'tracked_tx_bytes')}
@@ -1726,7 +1734,8 @@ if __name__ == '__main__':
     Thread(target=tablet_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
     from hub_router_traffic import polling_loop as router_traffic_loop
-    Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
+    Thread(target=router_traffic_loop,
+           args=(STOP, lambda: router_traffic_interface(load_active_config() or {})), daemon=True).start()
     Thread(target=cellular_web_sync_loop, daemon=True).start()
     Thread(target=eco_control_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()

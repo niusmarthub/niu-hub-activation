@@ -28,6 +28,21 @@ class RouterTrafficTest(unittest.TestCase):
         self.assertEqual((result["tracked_rx_bytes"], result["tracked_tx_bytes"]), (300, 500))
         self.assertEqual(json.loads(traffic.STATE_PATH.read_text())["totals"], {"rx": 300, "tx": 500})
 
+    def test_cellular_starts_its_own_baseline_without_erasing_ethernet(self):
+        with patch.object(traffic, "read_counters", side_effect=[
+            (1000, 2000), (1300, 2500), (10000, 20000), (10350, 20750)
+        ]) as read_counters:
+            traffic.sample()
+            traffic.sample()
+            baseline = traffic.sample(traffic.CELLULAR_INTERFACE)
+            cellular = traffic.sample(traffic.CELLULAR_INTERFACE)
+
+        self.assertEqual(baseline["interface"], "wwan0")
+        self.assertEqual((baseline["tracked_rx_bytes"], baseline["tracked_tx_bytes"]), (0, 0))
+        self.assertEqual((cellular["tracked_rx_bytes"], cellular["tracked_tx_bytes"]), (350, 750))
+        self.assertEqual(json.loads(traffic.STATE_PATH.read_text())["totals"], {"rx": 300, "tx": 500})
+        read_counters.assert_called_with("wwan0")
+
     def test_reset_does_not_count_fake_traffic(self):
         with patch.object(traffic, "read_counters", side_effect=[(1000, 2000), (1300, 2500), (10, 20), (40, 50)]):
             traffic.sample()
