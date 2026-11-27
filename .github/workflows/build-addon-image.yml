@@ -1,7 +1,7 @@
 name: Build Niu Hub Activation images
 on:
   push:
-    branches: [dev-0.4.6]
+    branches: [main]
     paths:
       - "niusmart_activation/**"
       - "tests/**"
@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
-    if: github.ref == 'refs/heads/dev-0.4.6'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
           python3 - <<'PY'
           import pathlib, yaml
           cfg = yaml.safe_load(pathlib.Path("niusmart_activation/config.yaml").read_text())
-          assert cfg["version"] == "0.4.6", "Version mismatch"
+          assert cfg["version"] == "0.4.7", "Version mismatch"
           assert cfg["arch"] == ["aarch64", "amd64"]
           assert cfg["image"] == "ghcr.io/niusmarthub/niu-hub-activation"
           PY
@@ -44,7 +44,7 @@ jobs:
     needs: validate
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && endsWith(github.event.head_commit.message, '[publish 0.4.6]'))
+      (github.event_name == 'push' && endsWith(github.event.head_commit.message, '[publish 0.4.7]'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +61,7 @@ jobs:
           context: ./niusmart_activation
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/niusmarthub/niu-hub-activation:0.4.6
+          tags: ghcr.io/niusmarthub/niu-hub-activation:0.4.7
           provenance: false
 
   verify-public-image:
@@ -75,7 +75,7 @@ jobs:
           import urllib.request
           base = "https://ghcr.io"
           image = "niusmarthub/niu-hub-activation"
-          tag = "0.4.6"
+          tag = "0.4.7"
           token_url = base + "/token?scope=repository:" + image + ":pull&service=ghcr.io"
           with urllib.request.urlopen(token_url, timeout=30) as response:
               token = json.load(response)["token"]

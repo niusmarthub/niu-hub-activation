@@ -141,15 +141,13 @@ def current_status():
         return dict(_status)
 
 
-def polling_loop(stop_event, select_interface):
+def polling_loop(stop_event):
     global _status
     while not stop_event.is_set():
-        interface = LEGACY_INTERFACE
         try:
-            interface = select_interface()
-            result = sample(interface)
+            result = sample(CELLULAR_INTERFACE)
         except Exception as exc:
-            result = {"status": "unavailable", "interface": interface,
+            result = {"status": "unavailable", "interface": CELLULAR_INTERFACE,
                       "error": type(exc).__name__, "source": "QX210 LuCI"}
         with _lock:
             _status = result

@@ -1063,16 +1063,8 @@ def eco_control_loop():
         STOP.wait(5)
 
 
-def router_traffic_interface(config):
-    from hub_router_traffic import CELLULAR_INTERFACE, LEGACY_INTERFACE
-
-    if config.get('site_id') == 2 and config.get('device_code') == 'REM-0021':
-        return CELLULAR_INTERFACE
-    return LEGACY_INTERFACE
-
-
 def cellular_web_sync_loop():
-    from hub_router_traffic import current_status
+    from hub_router_traffic import CELLULAR_INTERFACE, current_status
 
     sent = None
     while not STOP.is_set():
@@ -1081,7 +1073,7 @@ def cellular_web_sync_loop():
             sample = current_status()
             if (validate_identity_for_sync(config) and not PENDING_FILE.exists()
                     and sample.get('status') == 'ok'
-                    and sample.get('interface') == router_traffic_interface(config)
+                    and sample.get('interface') == CELLULAR_INTERFACE
                     and 0 <= time.time() - sample['sampled_at'] <= 600):
                 identity = (config['site_id'], config['hub_identifier'],
                             config['api_base_url'], config['api_key'], sample['interface'], sample['sampled_at'])
@@ -1160,6 +1152,7 @@ def entity_state_sync_loop():
 
 
 BMS_SNAPSHOT = None
+BMS_REFRESH_INTERVAL = 5 * 60
 
 
 def bms_capture_loop():
@@ -1198,11 +1191,12 @@ def bms_capture_loop():
 
 
 def batch_sync_loop():
-    from hub_bms import BMS_SOURCE
+    from hub_bms import BMS_SOURCE, BMS_SUMMARY_METRICS
 
     queue = None
     identity = last_level = last_mode = None
     next_report = next_flush = eco_due = next_bms = 0
+    next_bms_refresh = 0
     eco_draining = False
     retry = 2
     while not STOP.is_set():
@@ -1217,6 +1211,7 @@ def batch_sync_loop():
                 if binding != identity:
                     identity = binding
                     next_report = next_flush = next_bms = 0
+                    next_bms_refresh = 0
                     eco_due = now + ECO_BATCH_INTERVAL
                     last_level = last_mode = None
                     eco_draining = False
@@ -1240,9 +1235,15 @@ def batch_sync_loop():
                     if (snapshot and snapshot[0] == binding and now >= next_bms
                             and 0 <= now - snapshot[1] <= 120):
                         next_bms = now + 60
+                        refresh_summary = now >= next_bms_refresh or mode == 'eco'
+                        sampled_at = time.time() - (now - snapshot[1])
                         try:
                             for entity, state, label in snapshot[2]:
-                                queue.append(config, entity, BMS_SOURCE, state, time.time(), friendly_name=label)
+                                metric = entity.split('_', 3)[-1]
+                                queue.append(config, entity, BMS_SOURCE, state, sampled_at, friendly_name=label,
+                                             refresh=refresh_summary and metric in BMS_SUMMARY_METRICS)
+                            if refresh_summary:
+                                next_bms_refresh = now + BMS_REFRESH_INTERVAL
                         except Exception as exc:
                             diagnostic_error('bms_queue_error', exc)
                     try:
@@ -1734,8 +1735,7 @@ if __name__ == '__main__':
     Thread(target=tablet_loop, daemon=True).start()
     Thread(target=netbird_loop, daemon=True).start()
     from hub_router_traffic import polling_loop as router_traffic_loop
-    Thread(target=router_traffic_loop,
-           args=(STOP, lambda: router_traffic_interface(load_active_config() or {})), daemon=True).start()
+    Thread(target=router_traffic_loop, args=(STOP,), daemon=True).start()
     Thread(target=cellular_web_sync_loop, daemon=True).start()
     Thread(target=eco_control_loop, daemon=True).start()
     Thread(target=homeassistant_features_loop, daemon=True).start()

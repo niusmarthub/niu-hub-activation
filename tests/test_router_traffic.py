@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 import hub_router_traffic as traffic
@@ -42,6 +43,17 @@ class RouterTrafficTest(unittest.TestCase):
         self.assertEqual((cellular["tracked_rx_bytes"], cellular["tracked_tx_bytes"]), (350, 750))
         self.assertEqual(json.loads(traffic.STATE_PATH.read_text())["totals"], {"rx": 300, "tx": 500})
         read_counters.assert_called_with("wwan0")
+
+    def test_polling_selects_cellular_for_every_qx210(self):
+        stop = Event()
+        with (
+            patch.object(traffic, "_status", {"status": "waiting"}),
+            patch.object(traffic, "sample", return_value={"interface": "wwan0"}) as sample,
+            patch.object(stop, "wait", side_effect=lambda _seconds: stop.set()),
+        ):
+            traffic.polling_loop(stop)
+
+        sample.assert_called_once_with("wwan0")
 
     def test_reset_does_not_count_fake_traffic(self):
         with patch.object(traffic, "read_counters", side_effect=[(1000, 2000), (1300, 2500), (10, 20), (40, 50)]):

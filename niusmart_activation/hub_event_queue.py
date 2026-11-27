@@ -107,7 +107,7 @@ class EventQueue:
                 ON CONFLICT(identity) DO UPDATE SET level=excluded.level,rejected=rejected+excluded.rejected""",
                        (identity, level, rejected))
 
-    def append(self, config, entity_id, source, state, event_at, attributes=None, friendly_name=None):
+    def append(self, config, entity_id, source, state, event_at, attributes=None, friendly_name=None, *, refresh=False):
         identity = self.identity(config)
         event = {"event_id": str(uuid.uuid4()), "event_at": int(event_at),
                  "entity_id": entity_id, "source": source, "state": state}
@@ -122,7 +122,7 @@ class EventQueue:
             level, _, _ = self.disk(db)
             old = db.execute("""SELECT fingerprint,dropped FROM captured_states
                 WHERE identity=? AND source=? AND entity_id=?""", (identity, source, entity_id)).fetchone()
-            if old == (fingerprint, 0) or (old == (fingerprint, 1) and level == "blocked"):
+            if (old == (fingerprint, 0) and not refresh) or (old == (fingerprint, 1) and level == "blocked"):
                 self.record_disk(db, identity, level)
                 return None
             blocked = level == "blocked"

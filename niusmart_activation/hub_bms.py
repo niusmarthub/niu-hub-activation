@@ -6,6 +6,7 @@ import re
 from hub_homeassistant import core_api
 
 BMS_SOURCE = "bms_ble"
+BMS_SUMMARY_METRICS = frozenset({"voltage", "current", "stored_energy", "design_capacity", "charge_pct"})
 STANDBY_CURRENT = 0.1
 DEVICE_ID = re.compile(r"[a-f0-9]{32}")
 MODEL_ENTITY = re.compile(r"(?:sensor|binary_sensor)\.dp04s007l4s100a_(.+?)(?:_([0-9]+))?")

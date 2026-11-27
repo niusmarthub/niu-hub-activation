@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from hub_bms import DEVICE_ID, METRIC_BY_SUFFIX, MODEL_ENTITY
 from hub_homeassistant import core_api
 
 CARD_SOURCE = Path("/usr/local/share/niu_tablet")
@@ -71,7 +72,7 @@ def tablet_attributes(root, config, mappings):
         entities = json.loads(registry.read_text(encoding="utf-8"))["data"]["entities"] if registry.is_file() else []
     except (OSError, ValueError, KeyError, TypeError):
         entities = []
-    climate, solar = {}, {}
+    climate, solar, bms = {}, {}, {}
     hub_key = config["device_code"].lower()
     for entry in entities:
         entity = entry.get("entity_id", "")
@@ -89,7 +90,18 @@ def tablet_attributes(root, config, mappings):
                 domain = "binary_sensor" if key == "load_state" else "sensor"
                 if unique_id == f"niusmart_{hub_key}_eco_worthy_{domain}_eco_worthy_{key}":
                     solar[key] = entity
-    return {"options": options, "mappings": mappings, "climate": climate, "solar": solar}
+        if platform == "bms_ble" and options["has_solar_panels"]:
+            device = entry.get("device_id") or ""
+            match = MODEL_ENTITY.fullmatch(entity)
+            if match and DEVICE_ID.fullmatch(device):
+                metric = METRIC_BY_SUFFIX.get(match[1])
+                if metric:
+                    metrics = bms.setdefault(device, {})
+                    metrics[metric] = min(metrics.get(metric, entity), entity)
+    batteries = [metrics for metrics in bms.values() if "charge_pct" in metrics]
+    batteries.sort(key=lambda metrics: metrics["charge_pct"])
+    return {"options": options, "mappings": mappings, "climate": climate,
+            "solar": solar, "bms": batteries}
 
 
 def publish_tablet(state, attributes=None):

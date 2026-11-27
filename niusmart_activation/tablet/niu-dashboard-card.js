@@ -165,7 +165,7 @@ class NiuDashboardCard extends HTMLElement {
       this.textContent = this._t('Configuration NiuSmart en attente', 'Waiting for NiuSmart configuration');
       return;
     }
-    const {options, climate, solar} = data;
+    const {options, climate, solar, bms = []} = data;
     const locale = this._lang === 'en' ? 'en-CA' : 'fr-CA';
     const format = (value, unit, decimals = 1) => Number.isFinite(value)
       ? value.toLocaleString(locale, {maximumFractionDigits: decimals}) + ' ' + unit : '—';
@@ -243,6 +243,39 @@ class NiuDashboardCard extends HTMLElement {
         row(this._t('Courant de sortie', 'Output current'), value(solar.load_current, 'A')),
         row(this._t('Puissance de sortie', 'Output power'), value(solar.load_power, 'W'))
       ]));
+      const batteryMetrics = [
+        ['voltage', this._t('Tension', 'Voltage'), 'V'],
+        ['current', this._t('Courant', 'Current'), 'A'],
+        ['temperature', this._t('Température', 'Temperature'), '°C'],
+        ['stored_energy', this._t('Énergie restante', 'Energy remaining'), 'Wh'],
+        ['runtime', this._t('Autonomie estimée', 'Estimated runtime'), 'h']
+      ];
+      for (const [index, battery] of bms.entries()) {
+        const current = raw(battery.current);
+        const voltage = raw(battery.voltage);
+        const mode = !Number.isFinite(current) ? '—'
+          : current < -0.1 ? this._t('En décharge', 'Discharging')
+          : current > 0.1 ? this._t('En charge', 'Charging')
+          : this._t('En veille', 'Standby');
+        const rows = [
+          row(this._t('Charge', 'Charge'), value(battery.charge_pct, '%')),
+          row(this._t('État', 'Status'), mode)
+        ];
+        for (const [key, label, unit] of batteryMetrics) {
+          if (battery[key] && (key !== 'runtime' || current < -0.1)) {
+            rows.push(row(label, value(battery[key], unit)));
+          }
+        }
+        const watts = raw(battery.power);
+        rows.push(row(this._t('Puissance', 'Power'), format(Number.isFinite(watts) ? watts : voltage * current, 'W')));
+        const cells = sensor(battery.delta_voltage)?.attributes?.cell_voltages;
+        if (Array.isArray(cells)) {
+          for (const [cell, reading] of cells.slice(0, 32).entries()) {
+            rows.push(row(this._t('Cellule', 'Cell') + ' ' + (cell + 1), format(reading, 'V', 3)));
+          }
+        }
+        cards.push(card(this._t('🔋 BATTERIE BMS', '🔋 BMS BATTERY') + ' ' + (index + 1), rows));
+      }
     }
     for (let n = 1; n <= options.climate_count; n++) {
       const zone = climate[String(n)] || {};

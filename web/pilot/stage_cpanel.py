@@ -1,4 +1,4 @@
-"""Stage the REM-0021 changes from copies of the current cPanel files."""
+"""Stage NiuSmart updates from copies of the current cPanel files."""
 import argparse
 from pathlib import Path
 
@@ -10,10 +10,16 @@ def swap(source, before, after):
 
 
 def cellular_api(source):
+    old_guard = "if ($interface !== 'eth0' && !($site === 2 && $interface === 'wwan0'))"
+    guard = "if (!in_array($interface, ['eth0', 'wwan0'], true))"
+    if guard in source:
+        return source
+    if old_guard in source:
+        return swap(source, old_guard, guard)
+
     source = swap(source,
         "if (!is_array($body) || ($body['interface'] ?? '') !== 'eth0')",
-        """$interface = is_array($body) ? ($body['interface'] ?? '') : '';
-if ($interface !== 'eth0' && !($site === 2 && $interface === 'wwan0'))""")
+        "$interface = is_array($body) ? ($body['interface'] ?? '') : '';\n" + guard)
     source = swap(source, 'SELECT sampled_at, tracked_rx_bytes', 'SELECT interface_name, sampled_at, tracked_rx_bytes')
     source = swap(source, "    $deltaRx = $previous &&", """    if ($previous && $previous['interface_name'] === 'wwan0' && $interface === 'eth0') {
         $db->commit();
@@ -30,12 +36,29 @@ if ($interface !== 'eth0' && !($site === 2 && $interface === 'wwan0'))""")
 
 
 def cellular_web(source):
-    source = swap(source,
-        " $q=$pdo->prepare('SELECT MAX(sampled_at) FROM niusmart_hub_cellular_usage WHERE site_id=?');$q->execute([$id]);",
-        """ $interface = $id === 2 ? 'wwan0' : 'eth0';
- $q=$pdo->prepare('SELECT MAX(sampled_at) FROM niusmart_hub_cellular_usage WHERE site_id=? AND interface_name=?');$q->execute([$id,$interface]);""")
-    source = swap(source, 'WHERE site_id=? AND sampled_at>=?', 'WHERE site_id=? AND interface_name=? AND sampled_at>=?')
-    return swap(source, "[$id,$start->getTimestamp()", "[$id,$interface,$start->getTimestamp()")
+    selection = """ $q = $pdo->prepare("SELECT interface_name, sampled_at FROM niusmart_hub_cellular_usage
+    WHERE site_id=? AND interface_name IN ('wwan0','eth0')
+    ORDER BY (interface_name='wwan0') DESC, sampled_at DESC LIMIT 1");
+ $q->execute([$id]);
+ $latest = $q->fetch(PDO::FETCH_ASSOC);
+ $interface = $latest['interface_name'] ?? 'eth0';
+ $last = $latest['sampled_at'] ?? null;"""
+    if selection not in source:
+        legacy_selection = " $q=$pdo->prepare('SELECT MAX(sampled_at) FROM niusmart_hub_cellular_usage WHERE site_id=?');$q->execute([$id]);$last=$q->fetchColumn();"
+        pilot_selection = """ $interface = $id === 2 ? 'wwan0' : 'eth0';
+ $q=$pdo->prepare('SELECT MAX(sampled_at) FROM niusmart_hub_cellular_usage WHERE site_id=? AND interface_name=?');$q->execute([$id,$interface]);$last=$q->fetchColumn();"""
+        if pilot_selection in source:
+            source = swap(source, pilot_selection, selection)
+        else:
+            source = swap(source, legacy_selection, selection)
+            source = swap(source, 'WHERE site_id=? AND sampled_at>=?', 'WHERE site_id=? AND interface_name=? AND sampled_at>=?')
+            source = swap(source, "[$id,$start->getTimestamp()", "[$id,$interface,$start->getTimestamp()")
+
+    if 'niusmart_hub_cellular_monthly_opening' in source:
+        guard = "if ($periods['month'] !== null && $interface !== 'wwan0') {"
+        if guard not in source:
+            source = swap(source, "if ($periods['month'] !== null) {", guard)
+    return source
 
 
 def bms_api(source):
@@ -72,16 +95,20 @@ def solar_card(source):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cellular-only", action="store_true", help="Stage only the cellular PHP endpoints")
     parser.add_argument("source", type=Path)
     parser.add_argument("staged", type=Path)
     args = parser.parse_args()
     transforms = {
         "hub_cellular_usage_api.php": cellular_api,
         "hub_eco_web.php": cellular_web,
-        "site_states_api.php": bms_api,
-        "site.php": site_page,
-        "solar_site_card.php": solar_card,
     }
+    if not args.cellular_only:
+        transforms.update({
+            "site_states_api.php": bms_api,
+            "site.php": site_page,
+            "solar_site_card.php": solar_card,
+        })
     files = {}
     for name, transform in transforms.items():
         try:
@@ -91,8 +118,9 @@ def main():
     args.staged.mkdir(parents=True, exist_ok=False)
     for name, content in files.items():
         (args.staged / name).write_text(content)
-    javascript = Path(__file__).with_name("solar_bms_summary.js")
-    (args.staged / javascript.name).write_bytes(javascript.read_bytes())
+    if not args.cellular_only:
+        javascript = Path(__file__).with_name("solar_bms_summary.js")
+        (args.staged / javascript.name).write_bytes(javascript.read_bytes())
 
 
 if __name__ == "__main__":

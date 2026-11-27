@@ -86,6 +86,14 @@ class BatchTests(unittest.TestCase):
             self.queue.report(CONFIG, CONFIG['api_base_url'], 'normal')
         self.assertEqual(seen, [True, False])
 
+    def test_bms_summary_can_publish_a_fresh_reading_with_an_unchanged_value(self):
+        entity = 'sensor.niu_bms_' + 'a' * 32 + '_voltage'
+        time_at = 1760000000
+        self.assertIsNotNone(self.queue.append(CONFIG, entity, 'bms_ble', '13.24', time_at))
+        self.assertIsNone(self.queue.append(CONFIG, entity, 'bms_ble', '13.24', time_at + 60))
+        self.assertIsNotNone(self.queue.append(CONFIG, entity, 'bms_ble', '13.24', time_at + 300, refresh=True))
+        self.assertEqual([event['event_at'] for event in self.queue.pending(CONFIG)], [time_at, time_at + 300])
+
     def test_control_mode_is_scoped_to_hub(self):
         with patch.object(hub, 'ECO_CONTROL', (self.queue.identity(CONFIG), 'eco')):
             self.assertEqual(hub.requested_sync_mode(CONFIG), 'eco')
