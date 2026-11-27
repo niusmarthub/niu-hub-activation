@@ -5,6 +5,7 @@ on:
     paths:
       - "niusmart_activation/**"
       - "tests/**"
+      - "web/pilot/**"
       - ".github/workflows/build-addon-image.yml"
   workflow_dispatch:
 permissions:
@@ -22,7 +23,8 @@ jobs:
       - name: Validate Python and addon metadata
         run: |
           python3 -m pip install --quiet PyYAML tinytuya paho-mqtt websocket-client bleak
-          python3 -m compileall -q niusmart_activation
+          python3 -m compileall -q niusmart_activation web/pilot
+          node --check web/pilot/solar_bms_summary.js
           python3 - <<'PY'
           import pathlib, yaml
           cfg = yaml.safe_load(pathlib.Path("niusmart_activation/config.yaml").read_text())
